@@ -15,6 +15,7 @@ import asyncio
 import logging
 from uuid import UUID
 
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -53,8 +54,8 @@ async def run_extraction(
         logger.exception("Agent execution failed")
         raise RuntimeError(
             f"LLM agent failed: {exc}. "
-            f"Check that Ollama is running and the model "
-            f"'{settings.OLLAMA_MODEL}' is pulled."
+            f"Check that your GROQ_API_KEY is set and the model "
+            f"'{settings.GROQ_MODEL}' is accessible."
         ) from exc
 
     full_context = await _compile_context(db, project_doc_ids, agent_result)
@@ -257,62 +258,75 @@ async def _build_tools(
 
 
 def _run_agent(doc_names: list[str], tools: list) -> dict:
-    """Create and invoke the LangChain tools agent."""
-    from langchain.agents import AgentExecutor, create_tool_calling_agent
-    from langchain_core.prompts import ChatPromptTemplate
+    """Create and invoke a LangGraph ReAct agent with the given tools."""
+    from langgraph.prebuilt import create_react_agent
 
     llm = _build_llm()
 
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            ("system", _AGENT_SYSTEM_PROMPT),
-            ("human", _build_agent_input(doc_names)),
-            ("placeholder", "{agent_scratchpad}"),
-        ]
-    )
-
-    agent = create_tool_calling_agent(llm, tools, prompt)
-    executor = AgentExecutor(
-        agent=agent,
+    agent = create_react_agent(
+        model=llm,
         tools=tools,
-        verbose=False,
-        max_iterations=settings.AGENT_MAX_ITERATIONS,
-        return_intermediate_steps=True,
-        handle_parsing_errors=True,
+        prompt=SystemMessage(content=_AGENT_SYSTEM_PROMPT),
     )
 
-    logger.info("Invoking agent (max %d iterations)", settings.AGENT_MAX_ITERATIONS)
-    result = executor.invoke({"input": _build_agent_input(doc_names)})
+    user_input = _build_agent_input(doc_names)
+    logger.info(
+        "Invoking LangGraph agent (max %d iterations)", settings.AGENT_MAX_ITERATIONS
+    )
 
+    # Invoke with a recursion limit to cap iterations
+    result = agent.invoke(
+        {"messages": [HumanMessage(content=user_input)]},
+        config={"recursion_limit": settings.AGENT_MAX_ITERATIONS},
+    )
+
+    # Parse intermediate steps from the message trail
     doc_outputs: list[tuple[str, str]] = []
     policy_outputs: list[tuple[str, str]] = []
 
-    for action, observation in result.get("intermediate_steps", []):
-        tool_name = action.tool
-        tool_input = action.tool_input
-        if tool_name == "retrieve_document_chunks":
-            doc_outputs.append(
-                (tool_input.get("filename", "unknown"), str(observation))
-            )
-        elif tool_name == "search_policy_kb":
-            policy_outputs.append(
-                (tool_input.get("query", "unknown"), str(observation))
-            )
+    messages = result.get("messages", [])
+    for i, msg in enumerate(messages):
+        if isinstance(msg, AIMessage) and msg.tool_calls:
+            # An AI message with tool calls — the NEXT message should be ToolMessage(s)
+            for tc in msg.tool_calls:
+                tool_name = tc.get("name", "unknown")
+                tool_input = tc.get("args", {})
+                # Find the matching ToolMessage response (it follows this AIMessage)
+                output = _find_tool_output(messages, i + 1, tc.get("id"))
+                if tool_name == "retrieve_document_chunks":
+                    doc_outputs.append((tool_input.get("filename", "unknown"), output))
+                elif tool_name == "search_policy_kb":
+                    policy_outputs.append((tool_input.get("query", "unknown"), output))
+
+    # Extract the final AI summary text (last AIMessage without tool_calls)
+    final_output = ""
+    for msg in reversed(messages):
+        if isinstance(msg, AIMessage) and not msg.tool_calls and msg.content:
+            final_output = str(msg.content)
+            break
 
     logger.info(
-        "Agent complete: %d doc calls, %d policy calls, "
-        "%d iterations, output=%d chars",
+        "Agent complete: %d doc calls, %d policy calls, output=%d chars",
         len(doc_outputs),
         len(policy_outputs),
-        len(result.get("intermediate_steps", [])),
-        len(str(result.get("output", ""))),
+        len(final_output),
     )
 
     return {
-        "summary": str(result.get("output", "")),
+        "summary": final_output,
         "doc_outputs": doc_outputs,
         "policy_outputs": policy_outputs,
     }
+
+
+def _find_tool_output(messages: list, start_idx: int, tool_call_id: str | None) -> str:
+    """Find the ToolMessage matching a given tool_call_id in the message list."""
+    for msg in messages[start_idx:]:
+        if isinstance(msg, ToolMessage) and (
+            tool_call_id is None or msg.tool_call_id == tool_call_id
+        ):
+            return str(msg.content)
+    return ""
 
 
 def _build_agent_input(doc_names: list[str]) -> str:
@@ -367,15 +381,14 @@ async def _compile_context(
 
 
 def _build_llm():
-    """Create a fresh ChatOllama instance with project settings."""
-    from langchain_ollama import ChatOllama
+    """Create a fresh ChatGroq instance with project settings."""
+    from langchain_groq import ChatGroq
 
-    return ChatOllama(
-        model=settings.OLLAMA_MODEL,
+    return ChatGroq(
+        model=settings.GROQ_MODEL,
         temperature=0,
-        base_url=settings.OLLAMA_BASE_URL,
-        num_ctx=settings.OLLAMA_NUM_CTX,
-        num_predict=settings.OLLAMA_NUM_PREDICT,
+        api_key=settings.GROQ_API_KEY,
+        max_tokens=settings.GROQ_MAX_TOKENS,
     )
 
 
@@ -404,8 +417,8 @@ def _invoke_structured(
         logger.exception("%s failed", schema_name)
         raise RuntimeError(
             f"LLM call failed during {schema_name}: {exc}. "
-            f"Check that Ollama is running and the model "
-            f"'{settings.OLLAMA_MODEL}' is pulled."
+            f"Check that your GROQ_API_KEY is set and the model "
+            f"'{settings.GROQ_MODEL}' is accessible."
         ) from exc
 
 

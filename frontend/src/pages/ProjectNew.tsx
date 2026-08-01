@@ -363,7 +363,7 @@ export default function ProjectNew() {
         } catch (err: unknown) {
             const detail =
                 (err as { response?: { data?: { detail?: string } } })?.response?.data
-                    ?.detail ?? "Analysis failed. Is Ollama running?";
+                    ?.detail ?? "Analysis failed. Is the LLM service reachable?";
             setError(detail);
         } finally {
             setIsAnalyzing(false);
