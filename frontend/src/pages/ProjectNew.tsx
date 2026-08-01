@@ -7,10 +7,10 @@
 // ALLOWED_EXTENSIONS_LABEL) to keep UI formatting consistent.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 import { GlowingEffectCard } from "../components/ui/glowing-effect";
 import { cn } from "../components/utils";
-import { analyzeProject, createProject, getProject, type ProjectDocumentRef, type ProjectResponse } from "../api/project";
+import { analyzeProject, createProject, getProject, removeProjectDocument, type ProjectDocumentRef, type ProjectResponse } from "../api/project";
 import {
     ALLOWED_EXTENSIONS_LABEL,
     formatBytes,
@@ -255,11 +255,24 @@ function UploadSlot({ index, file, docRef, onSelect, onRemove, disabled }: SlotP
 
 export default function ProjectNew() {
     const navigate = useNavigate();
+    const { id: projectId } = useParams<{ id?: string }>(); // present when viewing an existing project
     const [files, setFiles] = useState<(File | null)[]>(Array(SLOT_COUNT).fill(null));
     const [project, setProject] = useState<ProjectResponse | null>(null);
     const [isUploading, setIsUploading] = useState(false);
     const [isAnalyzing, setIsAnalyzing] = useState(false);
     const [error, setError] = useState<string | null>(null);
+
+    // ── Load existing project by ID from the URL (reopening from sidebar) ──
+    useEffect(() => {
+        if (!projectId) return;
+        let cancelled = false;
+        getProject(projectId).then((p) => {
+            if (!cancelled) setProject(p);
+        }).catch(() => {
+            if (!cancelled) setError("Failed to load project.");
+        });
+        return () => { cancelled = true; };
+    }, [projectId]);
 
     // ── Poll ingestion status until all docs are indexed ──────────────────
     const projectStatus = project?.status;
@@ -292,13 +305,33 @@ export default function ProjectNew() {
 
     // ── Remove a file from a slot ────────────────────────────────────────
     const handleFileRemove = useCallback((index: number) => {
-        // If already uploaded, don't allow removal (would orphan the doc)
-        if (project) return;
-        setFiles((prev) => {
-            const next = [...prev];
-            next[index] = null;
-            return next;
-        });
+        // Pre-upload: just clear the local File state
+        if (!project) {
+            setFiles((prev) => {
+                const next = [...prev];
+                next[index] = null;
+                return next;
+            });
+            return;
+        }
+
+        // Post-upload: delete the document from DB/disk/FAISS + update project
+        const docRef = project.documents[index];
+        if (!docRef) return;
+
+        removeProjectDocument(project.id, docRef.id)
+            .then((result) => {
+                if ("deleted" in result) {
+                    // Last document removed — project fully deleted, reset to blank slate
+                    setProject(null);
+                    setFiles(Array(SLOT_COUNT).fill(null));
+                } else {
+                    setProject(result);
+                }
+            })
+            .catch(() => {
+                setError("Failed to remove document.");
+            });
     }, [project]);
 
     // ── Upload all selected files ────────────────────────────────────────

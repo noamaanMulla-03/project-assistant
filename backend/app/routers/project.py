@@ -16,6 +16,7 @@ import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
+from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -313,6 +314,99 @@ async def list_projects(
         project_responses.append(_project_to_response(p, doc_refs))
 
     return ProjectListResponse(projects=project_responses, total=total)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  DELETE /projects/{project_id}/documents/{document_id}
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@router.delete(
+    "/{project_id}/documents/{document_id}",
+    summary="Remove a document from a project",
+)
+async def remove_project_document(
+    project_id: uuid.UUID,
+    document_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Delete a document from a project — removes from disk, pgvector, FAISS,
+    and updates the project's document list.  Returns the updated project.
+    If the last document is removed, the project itself is deleted."""
+    # 1. Fetch project & verify ownership
+    project_result = await db.execute(select(Project).where(Project.id == project_id))
+    project = project_result.scalar_one_or_none()
+    if project is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Project not found.",
+        )
+    if project.created_by != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only modify your own projects.",
+        )
+
+    # 2. Verify the document belongs to this project
+    if document_id not in project.document_ids:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found in this project.",
+        )
+
+    # 3. Fetch the KnowledgeDocument to get disk path
+    doc_result = await db.execute(
+        select(KnowledgeDocument).where(KnowledgeDocument.id == document_id)
+    )
+    doc = doc_result.scalar_one_or_none()
+    if doc is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found.",
+        )
+
+    # 4. Remove from FAISS
+    from app.services.faiss_service import get_faiss_service
+
+    faiss = get_faiss_service()
+    await faiss.remove_document(document_id, db)
+
+    # 5. Remove file from disk (best-effort)
+    disk_path = _upload_dir() / doc.file_path
+    try:
+        disk_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+    # 6. Delete the KnowledgeDocument (cascade-deletes chunks in pgvector)
+    await db.delete(doc)
+
+    # 7. Update project's document_ids array
+    new_ids = [did for did in project.document_ids if did != document_id]
+
+    if not new_ids:
+        # Last document removed — delete the whole project
+        await db.delete(project)
+        await db.commit()
+        return JSONResponse(
+            status_code=200,
+            content={
+                "deleted": True,
+                "message": "Project deleted (no documents remaining).",
+            },
+        )
+
+    project.document_ids = new_ids
+    project.status = _derive_project_status(
+        [d.status for d in await _resolve_documents(db, new_ids)]
+    )
+    await db.commit()
+    await db.refresh(project)
+
+    # 8. Return updated project
+    doc_refs = await _resolve_documents(db, project.document_ids)
+    return _project_to_response(project, doc_refs)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

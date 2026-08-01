@@ -32,6 +32,27 @@ export default {
 			},
 			// ── Colours — blended light/dark palette ───────────────────────────
 			colors: {
+				// Shadcn semantic colours (CSS-variable-backed for dark mode)
+				border: "oklch(var(--border) / <alpha-value>)",
+				input: "oklch(var(--input) / <alpha-value>)",
+				ring: "oklch(var(--ring) / <alpha-value>)",
+				background: "oklch(var(--background) / <alpha-value>)",
+				foreground: "oklch(var(--foreground) / <alpha-value>)",
+				card: {
+					DEFAULT: "oklch(var(--card) / <alpha-value>)",
+					foreground: "oklch(var(--card-foreground) / <alpha-value>)",
+				},
+				muted: {
+					DEFAULT: "oklch(var(--muted) / <alpha-value>)",
+					foreground:
+						"oklch(var(--muted-foreground) / <alpha-value>)",
+				},
+				accent: {
+					DEFAULT: "oklch(var(--accent) / <alpha-value>)",
+					foreground:
+						"oklch(var(--accent-foreground) / <alpha-value>)",
+				},
+				destructive: "oklch(var(--destructive) / <alpha-value>)",
 				// Soft indigo primary (lighter than the original blue)
 				primary: {
 					50: "#eef2ff",

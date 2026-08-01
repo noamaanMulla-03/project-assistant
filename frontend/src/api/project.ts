@@ -161,3 +161,15 @@ export async function analyzeProject(id: string): Promise<ExtractionResult> {
 	);
 	return data;
 }
+
+/** Remove a document from a project.  Deletes the doc from disk, DB, and FAISS.
+ *  Returns the updated project, or `{deleted: true}` if the last doc was removed. */
+export async function removeProjectDocument(
+	projectId: string,
+	documentId: string,
+): Promise<ProjectResponse | { deleted: true }> {
+	const { data } = await apiClient.delete<
+		ProjectResponse | { deleted: true }
+	>(`/projects/${projectId}/documents/${documentId}`);
+	return data;
+}

@@ -12,6 +12,7 @@ export interface KnowledgeDocument {
 	file_type: string;
 	file_size: number; // bytes
 	status: string; // "processing" | "indexed" | "error"
+	visibility: string; // "public" (knowledge base) | "private" (project)
 	uploaded_by: string | null;
 	uploaded_by_name: string | null;
 	created_at: string;
@@ -109,4 +110,19 @@ export async function downloadDocument(
 /** Delete a document by ID. */
 export async function deleteDocument(id: string): Promise<void> {
 	await apiClient.delete(`/knowledge/documents/${id}`);
+}
+
+// ── Document Text ────────────────────────────────────────────────────────────
+
+export interface DocumentText {
+	filename: string;
+	content: string;
+}
+
+/** Fetch the full reconstructed text of a document for the review viewer. */
+export async function fetchDocumentText(id: string): Promise<DocumentText> {
+	const { data } = await apiClient.get<DocumentText>(
+		`/knowledge/documents/${id}/text`,
+	);
+	return data;
 }

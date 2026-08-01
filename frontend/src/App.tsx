@@ -32,6 +32,7 @@ export default function App() {
                     <Route path="/dashboard" element={<Dashboard />} />
                     <Route path="/knowledge" element={<Knowledge />} />
                     <Route path="/project/new" element={<ProjectNew />} />
+                    <Route path="/project/:id" element={<ProjectNew />} />
                     <Route path="/project/:id/results" element={<ProjectResults />} />
                 </Route>
             </Route>

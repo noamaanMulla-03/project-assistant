@@ -88,3 +88,10 @@ class SearchResponse(BaseModel):
     results: list[SearchResult]
     query: str
     total: int
+
+
+class DocumentTextResponse(BaseModel):
+    """Full reconstructed text of a document with its filename."""
+
+    filename: str
+    content: str

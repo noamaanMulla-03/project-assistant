@@ -1,9 +1,18 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { resolve } from "path";
+import { fileURLToPath } from "url";
+
+const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
 // https://vite.dev/config/
 export default defineConfig({
 	plugins: [react()],
+	resolve: {
+		alias: {
+			"@": resolve(__dirname, "src"),
+		},
+	},
 	// Proxy API calls to the FastAPI backend during development
 	server: {
 		host: true, // Listen on all interfaces (needed for Docker)
@@ -15,6 +24,10 @@ export default defineConfig({
 				changeOrigin: true,
 			},
 			"/knowledge": {
+				target: "http://backend:8000",
+				changeOrigin: true,
+			},
+			"/projects": {
 				target: "http://backend:8000",
 				changeOrigin: true,
 			},

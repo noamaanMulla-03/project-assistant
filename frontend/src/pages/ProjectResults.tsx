@@ -3,11 +3,11 @@
 // Each category renders as a section card; every item shows its source
 // document and section for UI highlighting.
 
-import { useEffect, useState } from "react";
+import { useState, useEffect } from "react";
 import { useParams } from "react-router-dom";
-import { GlowingEffectCard } from "../components/ui/glowing-effect";
 import { cn } from "../components/utils";
-import { analyzeProject, type ExtractionResult } from "../api/project";
+import { analyzeProject, getProject, type ExtractionResult, type ProjectDocumentRef } from "../api/project";
+import ProjectReview from "./ProjectReview";
 
 // ── Confidence / Severity / Urgency colour maps ──────────────────────────────
 
@@ -185,15 +185,21 @@ function Spinner() {
 export default function ProjectResults() {
     const { id } = useParams<{ id: string }>();
     const [result, setResult] = useState<ExtractionResult | null>(null);
+    const [projectDocs, setProjectDocs] = useState<ProjectDocumentRef[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
+    const [tab, setTab] = useState<"results" | "review">("results");
 
     useEffect(() => {
         if (!id) return;
         setLoading(true);
         setError(null);
-        analyzeProject(id)
-            .then(setResult)
+        // Fetch both the extraction result and project document metadata in parallel
+        Promise.all([analyzeProject(id), getProject(id)])
+            .then(([extraction, project]) => {
+                setResult(extraction);
+                setProjectDocs(project.documents);
+            })
             .catch((err: unknown) => {
                 const detail =
                     (err as { response?: { data?: { detail?: string } } })?.response?.data
@@ -236,19 +242,57 @@ export default function ProjectResults() {
         );
     }
 
-    // ── Results ────────────────────────────────────────────────────────────
+    // ── Review Tab ──────────────────────────────────────────────────────
+    if (tab === "review") {
+        return (
+            <div className="flex h-[calc(100vh-4rem)] flex-col">
+                {/* Tab bar */}
+                <div className="flex shrink-0 items-center gap-1 border-b border-surface-200 bg-surface-50 px-4 py-2 dark:border-surface-dark-700 dark:bg-surface-dark-900">
+                    <button
+                        type="button"
+                        onClick={() => setTab("results")}
+                        className="rounded-md px-3 py-1 text-xs font-medium text-surface-500 transition-colors hover:bg-surface-100 hover:text-surface-700 dark:text-surface-dark-400 dark:hover:bg-surface-dark-800 dark:hover:text-surface-dark-200"
+                    >
+                        ← AI Results
+                    </button>
+                    <span className="mx-1 text-surface-300 dark:text-surface-dark-600">|</span>
+                    <span className="px-3 py-1 text-xs font-semibold text-primary-600 dark:text-primary-400">
+                        Review
+                    </span>
+                </div>
+                {/* Full-height split workspace */}
+                <div className="flex-1 overflow-hidden">
+                    <ProjectReview result={result} documents={projectDocs} />
+                </div>
+            </div>
+        );
+    }
+
+    // ── Results Tab ────────────────────────────────────────────────────────────
     return (
         <div className="px-4 py-12">
             <div className="mx-auto max-w-5xl">
-                {/* Header */}
+                {/* Header + Tab bar */}
                 <div className="mb-8">
-                    <h1 className="text-2xl font-semibold text-surface-800 dark:text-surface-dark-100">
-                        Analysis Results
-                    </h1>
-                    <p className="mt-1 text-sm text-surface-700 dark:text-surface-dark-300">
-                        AI-extracted facts, decisions, risks, and policy gaps from your
-                        project documents. Every item is linked to its source.
-                    </p>
+                    <div className="flex items-center justify-between">
+                        <div>
+                            <h1 className="text-2xl font-semibold text-surface-800 dark:text-surface-dark-100">
+                                Analysis Results
+                            </h1>
+                            <p className="mt-1 text-sm text-surface-700 dark:text-surface-dark-300">
+                                AI-extracted facts, decisions, risks, and policy gaps from your
+                                project documents. Every item is linked to its source.
+                            </p>
+                        </div>
+                        {/* Review tab link */}
+                        <button
+                            type="button"
+                            onClick={() => setTab("review")}
+                            className="rounded-lg bg-primary-600 px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-primary-700 dark:bg-primary-500 dark:hover:bg-primary-400 dark:text-surface-dark-950"
+                        >
+                            Open Review →
+                        </button>
+                    </div>
                 </div>
 
                 {/* Executive Summary */}

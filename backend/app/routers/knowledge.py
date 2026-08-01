@@ -22,6 +22,7 @@ from app.models.user import User
 from app.schemas.auth import MessageResponse
 from app.schemas.knowledge import (
     DocumentRef,
+    DocumentTextResponse,
     KnowledgeDocumentListResponse,
     KnowledgeDocumentResponse,
     SearchRequest,
@@ -55,18 +56,11 @@ def _resolve_upload_path() -> Path:
     return path
 
 
-async def _count_documents(db: AsyncSession, user_id: uuid.UUID) -> int:
-    """Return total number of documents visible to *user_id*.
-
-    Public docs are visible to everyone; private docs only to the uploader.
-    """
+async def _count_documents(db: AsyncSession) -> int:
+    """Return total number of public knowledge-base documents."""
     result = await db.execute(
         select(func.count(KnowledgeDocument.id)).where(
-            (KnowledgeDocument.visibility == "public")
-            | (
-                (KnowledgeDocument.visibility == "private")
-                & (KnowledgeDocument.uploaded_by == user_id)
-            )
+            KnowledgeDocument.visibility == "public"
         )
     )
     return result.scalar_one()
@@ -189,17 +183,11 @@ async def list_documents(
 
     Public docs are visible to all users; private docs only to the uploader.
     """
-    total = await _count_documents(db, current_user.id)
+    total = await _count_documents(db)
 
     result = await db.execute(
         select(KnowledgeDocument)
-        .where(
-            (KnowledgeDocument.visibility == "public")
-            | (
-                (KnowledgeDocument.visibility == "private")
-                & (KnowledgeDocument.uploaded_by == current_user.id)
-            )
-        )
+        .where(KnowledgeDocument.visibility == "public")
         .order_by(KnowledgeDocument.created_at.desc())
         .offset(skip)
         .limit(limit),
@@ -317,12 +305,17 @@ async def search_knowledge(
         return SearchResponse(results=[], query=body.query, total=0)
 
     # 3. Fetch chunk content + parent document metadata from pgvector
+    #    — only public documents (knowledge base), not private project files
     chunk_ids = [chunk_id for chunk_id, _score in hits]
 
     result = await db.execute(
         select(DocumentChunk)
+        .join(DocumentChunk.document)
         .options(selectinload(DocumentChunk.document))
-        .where(DocumentChunk.id.in_(chunk_ids))
+        .where(
+            DocumentChunk.id.in_(chunk_ids),
+            KnowledgeDocument.visibility == "public",
+        )
     )
     chunks = result.scalars().all()
 
@@ -400,3 +393,40 @@ def _doc_to_response(doc: KnowledgeDocument) -> KnowledgeDocumentResponse:
         uploaded_by_name=doc.uploader.full_name if doc.uploader else None,
         created_at=doc.created_at,
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  GET /knowledge/documents/{document_id}/text
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@router.get(
+    "/documents/{document_id}/text",
+    response_model=DocumentTextResponse,
+    summary="Get the full reconstructed text of a document",
+)
+async def get_document_text(
+    document_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return the complete text of a document reconstructed from its chunks.
+
+    Chunks are ordered by ``chunk_index`` so the concatenated result matches
+    the original document's paragraph order.  Used by the review workspace
+    to display and highlight source text.
+    """
+    doc = await _get_doc_or_404(db, document_id, current_user.id)
+
+    # Fetch all chunks ordered by their position in the original document
+    result = await db.execute(
+        select(DocumentChunk)
+        .where(DocumentChunk.document_id == document_id)
+        .order_by(DocumentChunk.chunk_index)
+    )
+    chunks = result.scalars().all()
+
+    # Concatenate chunk text with double-newline separators for readability
+    content = "\n\n".join(c.content for c in chunks)
+
+    return DocumentTextResponse(filename=doc.filename, content=content)

@@ -43,7 +43,7 @@ async def run_extraction(
     doc_names = [d.filename for d in documents]
     logger.info("Starting agent extraction for: %s", doc_names)
 
-    tools = _build_tools(db, project_doc_ids)
+    tools = await _build_tools(db, project_doc_ids)
 
     try:
         agent_result = await asyncio.to_thread(_run_agent, doc_names, tools)
@@ -167,20 +167,18 @@ CRITICAL RULES:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def _build_tools(
+async def _build_tools(
     db: AsyncSession,
     project_doc_ids: list[UUID],
 ) -> list:
     """Build two LangChain @tools as closures capturing db + doc_ids."""
     from langchain_core.tools import tool
 
-    async def _get_doc_map() -> dict[str, UUID]:
-        result = await db.execute(
-            select(KnowledgeDocument).where(KnowledgeDocument.id.in_(project_doc_ids))
-        )
-        return {d.filename: d.id for d in result.scalars().all()}
-
-    doc_map = asyncio.run(_get_doc_map())
+    # Fetch document filename→id mapping directly (we're in the main event loop)
+    result = await db.execute(
+        select(KnowledgeDocument).where(KnowledgeDocument.id.in_(project_doc_ids))
+    )
+    doc_map = {d.filename: d.id for d in result.scalars().all()}
 
     @tool
     def retrieve_document_chunks(filename: str) -> str:

@@ -7,7 +7,7 @@
 //   - All icons are inline SVGs — no external icon library
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { NavLink, useNavigate } from "react-router-dom";
+import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { motion, useMotionValue, useSpring, useTransform } from "motion/react";
 import { useAuth } from "../context/AuthContext";
 import { useTheme } from "../context/ThemeContext";
@@ -247,17 +247,16 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
     const { user, logout } = useAuth();
     const { theme, toggle: toggleTheme } = useTheme();
     const navigate = useNavigate();
+    const location = useLocation(); // re-fetch projects on every navigation
 
     // ── Projects list for sidebar nav ───────────────────────────────────
     const [projects, setProjects] = useState<ProjectResponse[]>([]);
 
     useEffect(() => {
-        let cancelled = false;
         listProjects(0, 10).then((res) => {
-            if (!cancelled) setProjects(res.projects);
+            setProjects(res.projects);
         }).catch(() => { });
-        return () => { cancelled = true; };
-    }, []);
+    }, [location.pathname]); // refresh when user navigates (e.g. after creating a project)
 
     // ── Spring-animated width for smooth expand / collapse ────────────────
     const widthMotion = useMotionValue(collapsed ? COLLAPSED_W : EXPANDED_W);
