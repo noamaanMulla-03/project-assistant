@@ -318,6 +318,7 @@ async def search_knowledge(
                 chunk_id=chunk.id,
                 content=chunk.content,
                 score=score,
+                metadata=chunk.metadata_json or {},
                 document=DocumentRef(
                     id=chunk.document.id,
                     filename=chunk.document.filename,

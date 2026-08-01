@@ -10,7 +10,16 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import (
+    BigInteger,
+    DateTime,
+    ForeignKey,
+    Integer,
+    JSON,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -122,6 +131,15 @@ class DocumentChunk(Base):
         Text,
         nullable=False,
         comment="The chunk's text content",
+    )
+    # Raw metadata dict from the LangChain document loader.  For PDFs this
+    # includes ``source`` (file path) and ``page`` (0-based page number).
+    # For DOCX/TXT it includes ``source``.  Stored as JSON so the frontend
+    # can display page citations without a schema migration per loader.
+    metadata_json: Mapped[dict | None] = mapped_column(
+        JSON(none_as_null=True),
+        nullable=True,
+        comment="Raw metadata from the LangChain loader (source, page, etc.)",
     )
     # pgvector column storing the 384-dim embedding from all-MiniLM-L6-v2
     embedding: Mapped[list[float]] = mapped_column(

@@ -181,6 +181,10 @@ async def ingest_document(
                     chunk_index=i,
                     content=chunk.page_content,
                     embedding=vector,
+                    # Preserve loader metadata: page numbers (PDF),
+                    # source path, etc.  Null-safe — if .metadata is
+                    # empty we store None rather than an empty dict.
+                    metadata_json=chunk.metadata if chunk.metadata else None,
                 )
                 chunk_models.append(chunk_model)
                 chunk_ids_and_vectors.append((chunk_model.id, vector))

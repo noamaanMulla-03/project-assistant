@@ -63,7 +63,8 @@ class DocumentRef(BaseModel):
 
 
 class SearchResult(BaseModel):
-    """A single search hit: a matched chunk with its score and parent document."""
+    """A single search hit: a matched chunk with its score, parent document,
+    and the raw loader metadata (page numbers, source path, etc.)."""
 
     chunk_id: UUID
     content: str
@@ -72,6 +73,10 @@ class SearchResult(BaseModel):
         description="Cosine similarity score (0.0–1.0, higher = more relevant)",
     )
     document: DocumentRef
+    metadata: dict = Field(
+        default_factory=dict,
+        description="Raw metadata from the document loader (e.g. page number, source path)",
+    )
 
     model_config = {"from_attributes": True}
 
