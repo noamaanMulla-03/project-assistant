@@ -65,6 +65,26 @@ function KnowledgeIcon({ className }: { className?: string }) {
     );
 }
 
+function PlusCircleIcon({ className }: { className?: string }) {
+    return (
+        <svg
+            className={className}
+            width="22"
+            height="22"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+        >
+            <circle cx="12" cy="12" r="10" />
+            <line x1="12" y1="8" x2="12" y2="16" />
+            <line x1="8" y1="12" x2="16" y2="12" />
+        </svg>
+    );
+}
+
 function SunIcon({ className }: { className?: string }) {
     return (
         <svg
@@ -339,6 +359,12 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
                     to="/dashboard"
                     label="Dashboard"
                     icon={<DashboardIcon />}
+                    collapsed={collapsed}
+                />
+                <NavItem
+                    to="/project/new"
+                    label="New Project"
+                    icon={<PlusCircleIcon />}
                     collapsed={collapsed}
                 />
                 <NavItem

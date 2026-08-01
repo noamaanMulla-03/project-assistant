@@ -14,6 +14,7 @@ import Login from "./pages/Login";
 import Register from "./pages/Register";
 import Dashboard from "./pages/Dashboard";
 import Knowledge from "./pages/Knowledge";
+import ProjectNew from "./pages/ProjectNew";
 
 export default function App() {
     return (
@@ -29,6 +30,7 @@ export default function App() {
                 <Route element={<AuthenticatedLayout />}>
                     <Route path="/dashboard" element={<Dashboard />} />
                     <Route path="/knowledge" element={<Knowledge />} />
+                    <Route path="/project/new" element={<ProjectNew />} />
                 </Route>
             </Route>
 

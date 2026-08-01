@@ -11,6 +11,7 @@ from app.config import settings
 from app.database import engine, Base, AsyncSessionLocal
 from app.routers.auth import router as auth_router
 from app.routers.knowledge import router as knowledge_router
+from app.routers.project import router as project_router
 
 
 @asynccontextmanager
@@ -68,6 +69,7 @@ app.add_middleware(
 # ── Routers ───────────────────────────────────────────────────────────────────
 app.include_router(auth_router)
 app.include_router(knowledge_router)
+app.include_router(project_router)
 
 
 # ── Health Check ──────────────────────────────────────────────────────────────

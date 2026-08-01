@@ -15,6 +15,7 @@ from app.database import Base
 # Import all models so Alembic can detect them
 from app.models.user import User, TokenBlacklist  # noqa: F401
 from app.models.knowledge import KnowledgeDocument, DocumentChunk  # noqa: F401
+from app.models.project import Project  # noqa: F401
 
 # Alembic Config object
 config = context.config
