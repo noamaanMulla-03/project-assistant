@@ -1,7 +1,10 @@
 # ── Knowledge Router ──────────────────────────────────────────────────────────
 # Endpoints for uploading, listing, downloading, deleting, and semantically
-# searching knowledge-base documents.  All endpoints require authentication —
-# the knowledge base is universal (shared across all user accounts).
+# searching knowledge-base documents.  All endpoints require authentication.
+#
+# Visibility model:
+#   - "public"  → universal knowledge base, visible to all authenticated users
+#   - "private" → project documents, visible only to the user who uploaded them
 
 import uuid
 from pathlib import Path
@@ -52,9 +55,20 @@ def _resolve_upload_path() -> Path:
     return path
 
 
-async def _count_documents(db: AsyncSession) -> int:
-    """Return total number of documents in the knowledge base."""
-    result = await db.execute(select(func.count(KnowledgeDocument.id)))
+async def _count_documents(db: AsyncSession, user_id: uuid.UUID) -> int:
+    """Return total number of documents visible to *user_id*.
+
+    Public docs are visible to everyone; private docs only to the uploader.
+    """
+    result = await db.execute(
+        select(func.count(KnowledgeDocument.id)).where(
+            (KnowledgeDocument.visibility == "public")
+            | (
+                (KnowledgeDocument.visibility == "private")
+                & (KnowledgeDocument.uploaded_by == user_id)
+            )
+        )
+    )
     return result.scalar_one()
 
 
@@ -117,6 +131,7 @@ async def upload_document(
         file_size=len(content),
         uploaded_by=current_user.id,
         status="processing",
+        visibility="public",  # Knowledge Base → shared across all accounts
     )
     db.add(doc)
     await db.flush()
@@ -172,12 +187,19 @@ async def list_documents(
 ):
     """Return a paginated list of knowledge-base documents, newest first.
 
-    The knowledge base is universal — all authenticated users see all documents.
+    Public docs are visible to all users; private docs only to the uploader.
     """
-    total = await _count_documents(db)
+    total = await _count_documents(db, current_user.id)
 
     result = await db.execute(
         select(KnowledgeDocument)
+        .where(
+            (KnowledgeDocument.visibility == "public")
+            | (
+                (KnowledgeDocument.visibility == "private")
+                & (KnowledgeDocument.uploaded_by == current_user.id)
+            )
+        )
         .order_by(KnowledgeDocument.created_at.desc())
         .offset(skip)
         .limit(limit),
@@ -205,7 +227,7 @@ async def download_document(
     current_user: User = Depends(get_current_user),
 ):
     """Return the raw file for download."""
-    doc = await _get_doc_or_404(db, document_id)
+    doc = await _get_doc_or_404(db, document_id, current_user.id)
 
     disk_path = _resolve_upload_path() / doc.file_path
     if not disk_path.is_file():
@@ -240,7 +262,7 @@ async def delete_document(
 
     Chunks in pgvector are cascade-deleted by the FK; FAISS is cleaned up here.
     """
-    doc = await _get_doc_or_404(db, document_id)
+    doc = await _get_doc_or_404(db, document_id, current_user.id)
 
     # Remove from FAISS before DB cascade (need chunk IDs from DB first)
     from app.services.faiss_service import get_faiss_service
@@ -338,17 +360,29 @@ async def search_knowledge(
 
 
 async def _get_doc_or_404(
-    db: AsyncSession, document_id: uuid.UUID
+    db: AsyncSession, document_id: uuid.UUID, user_id: uuid.UUID | None = None
 ) -> KnowledgeDocument:
-    """Fetch a KnowledgeDocument by ID or raise 404."""
-    result = await db.execute(
-        select(KnowledgeDocument).where(KnowledgeDocument.id == document_id)
-    )
+    """Fetch a KnowledgeDocument by ID or raise 404.
+
+    When *user_id* is provided, also enforces visibility: the caller must
+    be the uploader for private documents.
+    """
+    where_clause = KnowledgeDocument.id == document_id
+    if user_id is not None:
+        where_clause &= (KnowledgeDocument.visibility == "public") | (
+            KnowledgeDocument.uploaded_by == user_id
+        )
+    result = await db.execute(select(KnowledgeDocument).where(where_clause))
     doc = result.scalar_one_or_none()
     if doc is None:
+        detail = (
+            "Document not found or you do not have permission to access it."
+            if user_id is not None
+            else "Document not found."
+        )
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Document not found.",
+            detail=detail,
         )
     return doc
 
@@ -361,6 +395,7 @@ def _doc_to_response(doc: KnowledgeDocument) -> KnowledgeDocumentResponse:
         file_type=doc.file_type,
         file_size=doc.file_size,
         status=doc.status,
+        visibility=doc.visibility,
         uploaded_by=doc.uploaded_by,
         uploaded_by_name=doc.uploader.full_name if doc.uploader else None,
         created_at=doc.created_at,

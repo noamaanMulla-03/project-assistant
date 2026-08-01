@@ -18,6 +18,7 @@ class KnowledgeDocumentResponse(BaseModel):
     file_type: str
     file_size: int  # bytes
     status: str  # ingestion status: "processing" | "indexed" | "error"
+    visibility: str  # "public" (knowledge base) | "private" (project)
     uploaded_by: UUID | None
     uploaded_by_name: str | None  # full_name of uploader, null if user deleted
     created_at: datetime

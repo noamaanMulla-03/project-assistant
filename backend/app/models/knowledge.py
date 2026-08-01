@@ -78,6 +78,16 @@ class KnowledgeDocument(Base):
         server_default="processing",
         comment="Ingestion status: 'processing' | 'indexed' | 'error'",
     )
+    # Visibility controls who can see this document in list/search/download.
+    #   "public"  — universal knowledge base (all authenticated users)
+    #   "private" — project documents (only the uploader)
+    visibility: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="public",
+        server_default="public",
+        comment="Visibility: 'public' (knowledge base) or 'private' (project)",
+    )
 
     # ── Relationships ─────────────────────────────────────────────────────
     uploader: Mapped["User | None"] = relationship(

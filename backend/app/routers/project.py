@@ -180,6 +180,7 @@ async def create_project(
             file_size=len(content),
             uploaded_by=current_user.id,
             status="processing",
+            visibility="private",  # Project docs → uploader-only
         )
         doc_rows.append(doc)
 
