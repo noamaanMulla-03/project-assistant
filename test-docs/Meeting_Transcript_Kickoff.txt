@@ -1,0 +1,99 @@
+﻿Meeting Transcript: Project Nova Kickoff Sync
+
+
+Date: July 29, 2026 — 2:00 PM to 3:15 PM
+Attendees: Asha Patel (PM), Raj Mehta (Eng Lead), Mira Chen (Design), Sam Osei (Backend Eng)
+Recorded by: Auto-transcription (lightly cleaned for readability)
+
+
+Asha (PM): Thanks everyone for hopping on. Quick sync before we kick off the first sprint. I want to make sure we're aligned on who we're building this for, what the core technical decisions are, and — most importantly — when this is actually shipping.
+
+
+Raj (Eng Lead): Absolutely. I've been reviewing the initial architecture notes Sam shared. A few things jump out at me around the stack choices. Before we go further — Sam, can you confirm we're standardizing on PostgreSQL with pgvector for everything? No MongoDB, right?
+
+
+Sam (Backend Eng): That's correct. PostgreSQL is the single source of truth — metadata, user tables, chunks, vectors, everything lives in one Postgres instance. No document DB, no separate vector store. We're using pgvector's HNSW index and an in-memory FAISS index built at startup for fast ANN search.
+
+
+Asha (PM): Good. I'll note that as a confirmed decision. Stakeholders: Sam Osei, Raj Mehta. This affects the entire data architecture.
+
+
+Raj (Eng Lead): On the LLM side — we're going with Ollama running locally, correct? No cloud API calls?
+
+
+Sam (Backend Eng): Yes. Ollama with Qwen3 7B for the extraction pipeline, and HuggingFace sentence-transformers for embeddings. All local, no external API dependencies, zero token cost. The trade-off is inference latency — we're looking at 10-30 seconds per extraction run on CPU.
+
+
+Mira (Design): That's fine for the UX flow. Users will see a loading spinner during analysis. As long as it's under 40 seconds, it won't feel broken. I'll spec a progress indicator into the wireframes.
+
+
+Asha (PM): Let's talk launch timeline. I've been targeting Q1 2027 — January 15 specifically. Does that still hold?
+
+
+Raj (Eng Lead): I think we need to be realistic. Given the complexity of the 4-phase extraction pipeline and the policy KB integration, I'd push for Q2 2027 — say early April. The human review UI alone is a solid 4 weeks of frontend work.
+
+
+Asha (PM): Noted. I'll keep January 15 as the aspirational date in the PRD for now but we'll flag April as the engineering estimate. One of those needs to be resolved before the next steering committee meeting.
+
+
+Mira (Design): I have a concern about the policy gap detection visualization. If the AI finds, say, 20 missing actions from policies, how do we present that to a PM without overwhelming them? Do we group by urgency? Filter out low-severity ones by default?
+
+
+Asha (PM): Group by urgency — critical/high first, medium/low collapsed by default. That's a design decision we can lock in now. Stakeholders: Mira Chen, Asha Patel.
+
+
+Sam (Backend Eng): Quick note on the API layer — we're using FastAPI with JWT auth. Access tokens live in-memory on the frontend, refresh tokens in httpOnly cookies. No OAuth needed for MVP. We should document the rate limiting strategy though — I don't think we've specified that anywhere yet.
+
+
+Raj (Eng Lead): Agreed. That's an open item. Let's also plan the infrastructure review. We need to validate that Ollama + pgvector on a single Docker host can handle 10,000 concurrent users as the PRD states. Sam, can you own that?
+
+
+Sam (Backend Eng): Yes. I'll schedule the infrastructure review by August 15.
+
+
+Asha (PM): Action items from this meeting:
+
+
+Raj: Draft the API contract between frontend and backend by August 8. Priority: HIGH.
+Sam: Schedule infrastructure load-test review by August 15. Priority: HIGH.
+Mira: Wireframes for extraction results page by August 12. Include the urgency-based grouping we discussed.
+Asha: Finalize the policy knowledge base document list by August 5. We need at least 3 policies uploaded before the M3 milestone.
+
+
+Raj (Eng Lead): One more thing — the PRD mentions 10,000 concurrent users and a $500K budget. That's tight if we need GPU instances. We're assuming CPU-only inference works, but we haven't benchmarked it yet. That's a risk we need to track.
+
+
+Asha (PM): Agreed. It's in the PRD as R-03. Let's get that benchmark done in Sprint 1. Anything else?
+
+
+Mira (Design): Just to confirm — are we building RBAC into Phase 1? The PRD mentions role-based access for compliance reviewers versus PMs.
+
+
+Raj (Eng Lead): No. RBAC is a Phase 2 item. MVP ships with a single user role — authenticated users get full access. We'll add role differentiation after GA. Decision recorded: stakeholders Raj Mehta, Asha Patel.
+
+
+Asha (PM): Alright. Great sync. Let's reconvene in two weeks for sprint review. Thanks everyone.
+
+
+Meeting Summary
+
+
+Confirmed Decision: Technical Stack
+PostgreSQL (with pgvector) as single source of truth — no MongoDB. Stakeholders: Sam Osei, Raj Mehta.
+Confirmed Decision: LLM Pipeline
+Ollama + Qwen3 7B locally for extraction; HuggingFace for embeddings. Stakeholders: Sam Osei, Raj Mehta.
+Confirmed Decision: Authentication
+JWT auth with httpOnly cookie refresh; no OAuth for MVP. Stakeholders: Sam Osei, Raj Mehta.
+Confirmed Decision: Design & UX
+Policy gap results grouped by urgency in UI. Stakeholders: Mira Chen, Asha Patel.
+Confirmed Decision: Access Control
+RBAC deferred to Phase 2 — single user role in MVP. Stakeholders: Raj Mehta, Asha Patel.
+Timeline & Resources
+Target launch: January 15, 2027 (PM estimate) vs. April 2027 (engineering estimate) — unresolved conflict.
+Budget confirmed: $500,000 USD.
+Scalability target: 10,000 concurrent users.
+Action Items Summary
+API contract draft (Raj, Aug 8), infrastructure review (Sam, Aug 15), wireframes (Mira, Aug 12), policy doc list (Asha, Aug 5).
+Risks & Open Questions
+Risk: CPU-only inference for Qwen3 7B not yet benchmarked. Severity: HIGH.
+Open Question: Rate limiting strategy for API endpoints not yet defined.
