@@ -55,11 +55,12 @@ class Settings(BaseSettings):
 
     # ── LLM / Extraction ───────────────────────────────────────────────
     OLLAMA_BASE_URL: str = "http://localhost:11434"
-    OLLAMA_MODEL: str = "qwen3:7b"
-    OLLAMA_NUM_CTX: int = 8192  # context window size (tokens)
-    OLLAMA_NUM_PREDICT: int = 4096  # max output tokens
-    EXTRACTION_CHUNKS_PER_DOC: int = 15  # max chunks retrieved per project document
-    EXTRACTION_POLICY_TOP_K: int = 10  # max policy chunks from FAISS search
+    OLLAMA_MODEL: str = "qwen2.5:14b"  # stronger function-calling than 7B
+    OLLAMA_NUM_CTX: int = 12288  # agent needs room for tool schemas + results
+    OLLAMA_NUM_PREDICT: int = 8192  # final structured output can be large
+    EXTRACTION_CHUNKS_PER_DOC: int = 15  # max chunks per tool call
+    EXTRACTION_POLICY_TOP_K: int = 10  # max policy chunks per search
+    AGENT_MAX_ITERATIONS: int = 8  # max tool-calling rounds before forced stop
 
 
 # Singleton instance — import this everywhere

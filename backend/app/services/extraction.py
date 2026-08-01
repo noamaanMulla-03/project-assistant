@@ -1,37 +1,15 @@
 # ── Extraction Service ────────────────────────────────────────────────────────
-# Multi-step LangChain ChatOllama pipeline that analyses 1-3 vectorized project
-# documents against an organizational policy knowledge base.
+# LangChain tools agent that analyses 1-3 vectorized project documents against
+# an organizational policy knowledge base.
 #
-# Architecture — four sequential phases, each a narrow, focused LLM call:
-#
-#   Phase 1: PER-DOCUMENT EXTRACTION (parallel)
-#     Each project document gets its own LLM call with ONLY that document's
-#     chunks.  Extracts facts, decisions, assumptions, risks, open questions,
-#     and action items.  Source attribution is trivially correct because the
-#     LLM only sees one document at a time.
-#
-#   Phase 2: CROSS-DOCUMENT CONFLICT DETECTION
-#     LLM receives only the structured findings from Phase 1 (no raw chunks).
-#     Input is ~1K tokens of bullet-point summaries, so the 7B model can
-#     reason clearly about contradictions.
-#
-#   Phase 3: POLICY GAP ANALYSIS
-#     Backend searches the policy KB with keywords derived from Phase 1
-#     findings.  The LLM then compares Phase 1 findings against the matched
-#     policy chunks to identify missing actions.
-#
-#   Phase 4: EXECUTIVE SUMMARY SYNTHESIS
-#     One final call with condensed findings from all phases produces the
-#     human-readable summary.
-#
-# Why not a single giant prompt?
-#   • A 7B model producing 4K tokens across 8 categories inevitably produces
-#     shallow, inconsistent results.
-#   • Source attribution hallucination is eliminated — Phase 1 calls each see
-#     only one document.
-#   • Policy search is targeted — the backend searches with terms from actual
-#     findings, not a vague "organizational policies" query.
-#   • Failure isolation — if one phase fails, only that phase needs retry.
+# Architecture:
+#   The LLM (qwen2.5:14b with strong function-calling) is given two tools:
+#     1. retrieve_document_chunks(filename) — fetch chunks from pgvector
+#     2. search_policy_kb(query)            — FAISS semantic search on policies
+#   The agent autonomously explores: reads each document, searches for relevant
+#   policies based on what it finds, then produces a natural-language summary.
+#   The backend then feeds that summary + all tool outputs into a final
+#   with_structured_output(ExtractionResult) call to produce typed JSON.
 
 import asyncio
 import logging
@@ -43,18 +21,12 @@ from sqlalchemy.orm import selectinload
 
 from app.config import settings
 from app.models.knowledge import DocumentChunk, KnowledgeDocument
-from app.schemas.extraction import (
-    ConflictDetectionResult,
-    ExtractionResult,
-    PerDocumentExtraction,
-    PolicyGapResult,
-    SummaryResult,
-)
+from app.schemas.extraction import ExtractionResult
 
 logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  Public API — called by the FastAPI router
+#  Public API
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -62,470 +34,333 @@ async def run_extraction(
     db: AsyncSession,
     project_doc_ids: list[UUID],
 ) -> ExtractionResult:
-    """Orchestrate the full 4-phase extraction pipeline.
-
-    Args:
-        db: An active async database session.
-        project_doc_ids: UUIDs of the KnowledgeDocuments in this project (1-3).
-
-    Returns:
-        A complete ExtractionResult assembled from all four phases.
-    """
-    # ── Phase 1: Per-document extraction (parallel) ────────────────────────
-    logger.info("Phase 1: extracting %d document(s) in parallel", len(project_doc_ids))
-    doc_extractions = await _phase1_extract_all(db, project_doc_ids)
-
-    # ── Phase 2: Cross-document conflict + repeat detection ────────────────
-    logger.info("Phase 2: detecting cross-document conflicts and repeats")
-    conflicts, repeated = await _phase2_detect_conflicts(doc_extractions)
-
-    # ── Phase 3: Policy gap analysis ───────────────────────────────────────
-    logger.info("Phase 3: analysing policy gaps")
-    missing_actions, missing_questions = await _phase3_analyse_policy_gaps(
-        db, doc_extractions, project_doc_ids
+    """Run the LangChain tools agent to explore documents + policies, then
+    produce structured extraction output."""
+    doc_result = await db.execute(
+        select(KnowledgeDocument).where(KnowledgeDocument.id.in_(project_doc_ids))
     )
+    documents = doc_result.scalars().all()
+    doc_names = [d.filename for d in documents]
+    logger.info("Starting agent extraction for: %s", doc_names)
 
-    # ── Phase 4: Executive summary synthesis ───────────────────────────────
-    logger.info("Phase 4: synthesising executive summary")
-    summary = await _phase4_synthesise_summary(
-        doc_extractions, conflicts, missing_actions, repeated, missing_questions
-    )
+    tools = _build_tools(db, project_doc_ids)
 
-    # ── Assemble final result ──────────────────────────────────────────────
-    result = ExtractionResult(
-        summary=summary,
-        facts=[f for d in doc_extractions for f in d.facts],
-        decisions=[d for d_ in doc_extractions for d in d_.decisions],
-        assumptions=[a for d in doc_extractions for a in d.assumptions],
-        risks=[r for d in doc_extractions for r in d.risks],
-        open_questions=[q for d in doc_extractions for q in d.open_questions],
-        action_items=[a for d in doc_extractions for a in d.action_items],
-        document_conflicts=conflicts,
-        missing_actions=missing_actions,
-        missing_questions=missing_questions,
-        repeated_statements=repeated,
-    )
+    try:
+        agent_result = await asyncio.to_thread(_run_agent, doc_names, tools)
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        logger.exception("Agent execution failed")
+        raise RuntimeError(
+            f"LLM agent failed: {exc}. "
+            f"Check that Ollama is running and the model "
+            f"'{settings.OLLAMA_MODEL}' is pulled."
+        ) from exc
+
+    full_context = await _compile_context(db, project_doc_ids, agent_result)
+
     logger.info(
-        "Pipeline complete: %d facts, %d decisions, %d assumptions, "
-        "%d risks, %d questions, %d actions, %d conflicts, %d missing "
-        "actions, %d missing questions, %d repeats",
-        len(result.facts),
-        len(result.decisions),
-        len(result.assumptions),
-        len(result.risks),
-        len(result.open_questions),
-        len(result.action_items),
-        len(result.document_conflicts),
-        len(result.missing_actions),
-        len(result.missing_questions),
-        len(result.repeated_statements),
+        "Running final structured extraction (context=%d chars)", len(full_context)
     )
-    return result
+    return await asyncio.to_thread(
+        _invoke_structured, _EXTRACTION_SYSTEM_PROMPT, full_context, ExtractionResult
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  Phase 1 — Per-Document Extraction (parallel)
+#  Prompts
 # ═══════════════════════════════════════════════════════════════════════════════
 
-PHASE1_SYSTEM_PROMPT = """\
-You are a human-in-the-loop document extraction assistant. You are analysing \
-ONE document at a time. Your job is to surface what this document contains; \
-you do NOT make decisions or assign tasks.
+_AGENT_SYSTEM_PROMPT = """\
+You are a document exploration agent. Your ONLY job is to gather information \
+about a set of project documents and any relevant organizational policies. \
+You do NOT produce final analysis — the system will handle that separately.
 
-The context you receive contains chunks from a SINGLE document, formatted as:
+You have two tools:
+  - retrieve_document_chunks(filename): Get the text content of a project
+    document.  You MUST call this for EACH document to understand what it
+    contains.
+  - search_policy_kb(query): Search the organizational policy knowledge base
+    with a natural-language query.  Use this AFTER reading documents to find
+    policies relevant to the specific topics, risks, or standards mentioned.
 
+Your workflow:
+1. Call retrieve_document_chunks() for every document listed in the project.
+2. Based on what you find (key terms, risks, standards mentioned, compliance
+   topics), call search_policy_kb() with targeted queries.  Be specific —
+   instead of "safety", search for "fall protection scaffolding safety" if
+   that's what the document mentions.
+3. If your first policy search reveals new topics, follow up with additional
+   targeted searches.
+4. When you have gathered sufficient information, produce a concise natural-
+   language summary of what you found: document types, key themes, notable
+   facts and decisions, risks identified, any apparent contradictions between
+   documents, and policy areas that should be checked.
+"""
+
+_EXTRACTION_SYSTEM_PROMPT = """\
+You are a human-in-the-loop document extraction assistant. You are given \
+the complete text of project documents and relevant organizational policies. \
+Your job is to produce a structured extraction — you do NOT make decisions \
+or assign tasks.
+
+The context contains:
+  [DOCUMENT: <filename>]
   [SECTION: chunk <n> (<metadata>)]
   <text content>
+  ... (chunks from all project documents)
 
-Extract the following from this ONE document:
+  [POLICY: <filename>]
+  [SECTION: chunk <n> (<metadata>)]
+  <text content>
+  ... (policy chunks found by the exploration agent)
 
-1. DOCUMENT TYPE — identify what kind of document this is (requirements doc,
-   design spec, risk assessment, meeting notes, project charter, etc.).
+Extract the following:
 
-2. FACTS — statements the document presents as verifiable or objective.
-   Assign confidence: 'high' for definitive statements, 'medium' for
-   qualified statements, 'low' for uncertain or hedged claims.
+1. SUMMARY — Identify what type each DOCUMENT is and write an executive
+   summary covering key themes, notable facts, decisions, risks, conflicts,
+   and policy gaps across all loaded files.
 
-3. DECISIONS — choices that were made and recorded.  Include stakeholders
-   (people, roles, teams) when mentioned.
+2. FACTS — Confirmed, verifiable statements.  Assign confidence:
+   'high' for definitive, 'medium' for qualified, 'low' for hedged.
 
-4. ASSUMPTIONS — premises the document takes for granted without proof.
-   Mark validation_needed=true unless the assumption is trivially true.
+3. DECISIONS — Choices made and recorded.  Include stakeholders when mentioned.
 
-5. RISKS — potential negative outcomes, threats, or failure modes.
-   Assign severity ('critical', 'high', 'medium', 'low') and include any
-   mitigation mentioned.
+4. ASSUMPTIONS — Premises taken for granted without proof.
+   Mark validation_needed=true unless trivially true.
 
-6. OPEN QUESTIONS — explicit or implied questions the document raises but
-   does not answer.  Suggest an owner role if inferable.
+5. RISKS — Potential negative outcomes, threats, or failure modes.
+   Assign severity ('critical', 'high', 'medium', 'low') and include mitigation.
 
-7. ACTION ITEMS — tasks explicitly stated in the source text.  IMPORTANT:
-   ONLY extract items that are explicitly stated.  NEVER invent, create,
-   or auto-assign tasks.  If none exist, return an empty list.
+6. OPEN QUESTIONS — Questions the documents raise but don't answer.
+   Suggest an owner role if inferable.
+
+7. ACTION ITEMS — Tasks EXPLICITLY stated in the source text.
+   NEVER invent or auto-assign tasks.  Empty list if none exist.
+
+8. DOCUMENT CONFLICTS — Statements in different DOCUMENT blocks that
+   contradict each other.  Quote both, name both documents, suggest resolution.
+
+9. REPEATED STATEMENTS — Identical or substantially similar statements found
+   in multiple documents.  Mark is_exact_match=true for word-for-word matches.
+
+10. MISSING ACTIONS — Things that SHOULD exist based on the POLICY blocks
+    but are absent from project documents.  Reference policy filename + section.
+
+11. MISSING QUESTIONS — Questions the project SHOULD be asking based on
+    policies but isn't.  Reference policy filename + section.
 
 CRITICAL RULES:
-- EVERY item MUST include 'source_document' (the filename from the context
-  header) and 'source_section' (the [SECTION: ...] label).  Never leave
-  these empty.
-- If unsure whether something is a fact or assumption, classify it as an
-  assumption with confidence='low'.
-- Be thorough — it is better to extract too many items than to miss
-  something important.  The human reviewer will filter.
+- EVERY Fact, Decision, Assumption, Risk, OpenQuestion, and ActionItem MUST
+  include 'source_document' (match the [DOCUMENT: ...] header) and
+  'source_section' (match the [SECTION: ...] header).  Never leave them empty.
+- DocumentConflict uses document_a/document_b and section_a/section_b.
+- MissingAction and MissingQuestion use policy_reference and policy_section.
+- Be thorough — extract too many items rather than miss something.
+- Output ONLY valid JSON matching the schema exactly.  Every array field must
+  be present, even if empty ([]).
 """
 
-PHASE2_SYSTEM_PROMPT = """\
-You are a human-in-the-loop document reviewer. You are given structured \
-summaries of findings extracted from multiple project documents. Your jobs:
 
-1. Find CONFLICTS — statements that contradict each other across documents.
-   For each conflict, provide:
-   - statement_a / statement_b: the two contradictory statements
-   - document_a / document_b: which document each statement came from
-   - section_a / section_b: the section within each document
-   - resolution_suggestion: how a human reviewer might resolve this (or "" if unclear)
-
-2. Find REPEATED STATEMENTS — identical or substantially similar statements
-   that appear in two different documents.  These are NOT contradictions;
-   they are the same information stated twice.  For each repeated statement:
-   - statement: the repeated content
-   - document_a / document_b: which documents contain it
-   - section_a / section_b: the sections within each document
-   - is_exact_match: true if word-for-word identical, false if substantially same
-
-If nothing is found, return empty lists.  Do NOT fabricate items.
-"""
-
-PHASE3_SYSTEM_PROMPT = """\
-You are a human-in-the-loop compliance reviewer. You are given:
-  1. Structured findings extracted from project documents.
-  2. Relevant chunks from organizational policies and standards.
-
-Your jobs:
-
-1. Identify MISSING ACTIONS — things that SHOULD exist in the project \
-documents based on the policies, but are currently ABSENT.  For each:
-- description: what needs to be done
-- policy_reference: the policy filename that mandates this
-- policy_section: the section/chunk in the policy
-- urgency: 'critical' | 'high' | 'medium' | 'low' based on policy language
-
-2. Identify MISSING QUESTIONS — questions the project documents SHOULD be \
-asking based on the policies, but aren't.  For each:
-- question: the question that should be asked
-- policy_reference: the policy filename that implies this question
-- policy_section: the section/chunk in the policy
-- urgency: 'critical' | 'high' | 'medium' | 'low'
-
-Do NOT suggest actions or questions the policies don't actually require.  \
-If the policies don't reveal any gaps, return empty lists.
-"""
-
-PHASE4_SYSTEM_PROMPT = """\
-You are a document analysis summariser. You will receive a condensed summary \
-of findings from a multi-phase document analysis pipeline. Write a concise \
-executive summary (150-300 words) covering:
-
-1. What types of documents were analysed.
-2. Key themes and notable facts.
-3. The most important risks and decisions identified.
-4. Any cross-document conflicts detected.
-5. Any repeated statements found across documents.
-6. Critical policy gaps (missing actions and missed questions) that need attention.
-
-Write in clear, professional prose.  Do NOT use bullet points — this is a \
-narrative summary for a human reviewer.
-"""
-
-# ── Phase 1 — Per-Document Extraction Implementation ──────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Tool Builder
+# ═══════════════════════════════════════════════════════════════════════════════
 
 
-async def _phase1_extract_all(
+def _build_tools(
     db: AsyncSession,
     project_doc_ids: list[UUID],
-) -> list[PerDocumentExtraction]:
-    """Run Phase 1 extraction for every project document in parallel."""
-    doc_data = await _fetch_document_data(db, project_doc_ids)
-    tasks = [
-        _phase1_extract_one(filename, chunks_and_sections)
-        for filename, chunks_and_sections in doc_data
-    ]
-    return list(await asyncio.gather(*tasks))
+) -> list:
+    """Build two LangChain @tools as closures capturing db + doc_ids."""
+    from langchain_core.tools import tool
 
-
-async def _phase1_extract_one(
-    filename: str,
-    chunks: list[tuple[str, str]],  # (content, section_label)
-) -> PerDocumentExtraction:
-    """Extract findings from a single document via one LLM call."""
-    parts = [f"=== DOCUMENT: {filename} ==="]
-    for content, section_label in chunks:
-        parts.append(f"[SECTION: {section_label}]\n{content}\n")
-    context = "\n".join(parts)
-
-    logger.info("Phase 1: extracting from '%s' (%d chunks)", filename, len(chunks))
-    return await asyncio.to_thread(
-        _invoke_structured, PHASE1_SYSTEM_PROMPT, context, PerDocumentExtraction
-    )
-
-
-# ── Phase 2 — Conflict Detection Implementation ───────────────────────────
-
-
-async def _phase2_detect_conflicts(
-    doc_extractions: list[PerDocumentExtraction],
-) -> tuple[list, list]:
-    """Detect contradictions and repeated statements between documents.
-
-    Returns:
-        (conflicts, repeated_statements) — two lists, each may be empty.
-    """
-    if len(doc_extractions) < 2:
-        logger.info("Phase 2: skipped — only %d document(s)", len(doc_extractions))
-        return [], []
-
-    parts = ["=== CROSS-DOCUMENT CONFLICT ANALYSIS ===", ""]
-    for i, ext in enumerate(doc_extractions):
-        label = ext.facts[0].source_document if ext.facts else f"Document {i + 1}"
-        parts.append(f"--- Document: {label} ---")
-        parts.append(f"Type: {ext.document_type}")
-        for f in ext.facts:
-            parts.append(f"  FACT [{f.source_section}]: {f.content}")
-        for d in ext.decisions:
-            stake = ", ".join(d.stakeholders) if d.stakeholders else "none"
-            parts.append(
-                f"  DECISION [{d.source_section}]: {d.content} (stakeholders: {stake})"
-            )
-        for r in ext.risks:
-            parts.append(
-                f"  RISK [{r.source_section}]: {r.content} (severity: {r.severity})"
-            )
-        parts.append("")
-
-    context = "\n".join(parts)
-    logger.info("Phase 2: conflict detection context = %d chars", len(context))
-
-    result = await asyncio.to_thread(
-        _invoke_structured, PHASE2_SYSTEM_PROMPT, context, ConflictDetectionResult
-    )
-    return result.conflicts, result.repeated_statements
-
-
-# ── Phase 3 — Policy Gap Analysis Implementation ──────────────────────────
-
-
-async def _phase3_analyse_policy_gaps(
-    db: AsyncSession,
-    doc_extractions: list[PerDocumentExtraction],
-    project_doc_ids: list[UUID],
-) -> tuple[list, list]:
-    """Identify missing actions and questions by comparing project findings against policies.
-
-    Returns:
-        (missing_actions, missing_questions) — two lists, each may be empty.
-    """
-    queries = _derive_policy_queries(doc_extractions)
-
-    # Search FAISS for each query, deduplicate
-    all_policy_chunks: dict[str, tuple[int, str, dict | None, str]] = {}
-    for query in queries:
-        hits = await _search_policy_chunks(
-            db, query, project_doc_ids, settings.EXTRACTION_POLICY_TOP_K
+    async def _get_doc_map() -> dict[str, UUID]:
+        result = await db.execute(
+            select(KnowledgeDocument).where(KnowledgeDocument.id.in_(project_doc_ids))
         )
-        for idx, content, meta, filename in hits:
-            key = f"{filename}::chunk_{idx}"
-            if key not in all_policy_chunks:
-                all_policy_chunks[key] = (idx, content, meta, filename)
+        return {d.filename: d.id for d in result.scalars().all()}
 
-    if not all_policy_chunks:
-        logger.info("Phase 3: no relevant policy chunks found — skipping")
-        return [], []
+    doc_map = asyncio.run(_get_doc_map())
 
-    # Format project findings summary
-    parts = ["=== POLICY GAP ANALYSIS ===", "", "--- PROJECT FINDINGS ---"]
-    for ext in doc_extractions:
-        label = ext.facts[0].source_document if ext.facts else "Unknown"
-        parts.append(f"Document '{label}' ({ext.document_type}):")
-        for f in ext.facts:
-            parts.append(f"  FACT: {f.content}")
-        for d in ext.decisions:
-            parts.append(f"  DECISION: {d.content}")
-        for r in ext.risks:
-            parts.append(f"  RISK: {r.content} (severity: {r.severity})")
-        for q in ext.open_questions:
-            parts.append(f"  QUESTION: {q.content}")
-        parts.append("")
+    @tool
+    def retrieve_document_chunks(filename: str) -> str:
+        """Retrieve the full text content of a project document by its filename.
 
-    # Format policy chunks
-    parts.append("--- RELEVANT POLICIES ---")
-    for idx, content, meta, filename in all_policy_chunks.values():
-        section_label = _format_section_label(idx, meta)
-        parts.append(f"[POLICY: {filename}] [SECTION: {section_label}]\n{content}\n")
+        Args:
+            filename: The exact filename of the project document (e.g.
+                      'site-assessment.pdf', 'project-charter.docx').
 
-    context = "\n".join(parts)
+        Returns:
+            The document's text content split into labeled chunks with section
+            identifiers for source attribution.
+        """
+        doc_id = doc_map.get(filename)
+        if doc_id is None:
+            available = list(doc_map.keys())
+            return f"ERROR: Document '{filename}' not found. " f"Available: {available}"
+
+        async def _fetch():
+            chunks_result = await db.execute(
+                select(DocumentChunk)
+                .where(DocumentChunk.document_id == doc_id)
+                .order_by(DocumentChunk.chunk_index)
+                .limit(settings.EXTRACTION_CHUNKS_PER_DOC),
+            )
+            parts = [f"[DOCUMENT: {filename}]"]
+            for chunk in chunks_result.scalars().all():
+                section = _format_section_label(chunk.chunk_index, chunk.metadata_json)
+                parts.append(f"[SECTION: {section}]\n{chunk.content}\n")
+            return "\n".join(parts)
+
+        try:
+            return asyncio.run(_fetch())
+        except Exception as exc:
+            return f"ERROR retrieving document '{filename}': {exc}"
+
+    @tool
+    def search_policy_kb(query: str) -> str:
+        """Search the organizational policy knowledge base.
+
+        Use AFTER reading project documents to find policies relevant to
+        specific topics, risks, or standards mentioned.  Use specific queries:
+        instead of 'safety', search for 'fall protection scaffolding safety'.
+
+        Args:
+            query: Natural-language query for relevant policies/standards.
+
+        Returns:
+            Policy document chunks with [POLICY: ...] [SECTION: ...] labels.
+        """
+
+        async def _search():
+            hits = await _search_policy_chunks(
+                db, query, project_doc_ids, settings.EXTRACTION_POLICY_TOP_K
+            )
+            if not hits:
+                return f"No relevant policy documents found for query: '{query}'."
+            parts = ["=== POLICY SEARCH RESULTS ==="]
+            for idx, content, meta, filename in hits:
+                section = _format_section_label(idx, meta)
+                parts.append(f"[POLICY: {filename}] [SECTION: {section}]\n{content}\n")
+            return "\n".join(parts)
+
+        try:
+            return asyncio.run(_search())
+        except Exception as exc:
+            return f"ERROR searching policy KB for '{query}': {exc}"
+
+    logger.info("Built 2 tools for agent: %d document(s)", len(doc_map))
+    return [retrieve_document_chunks, search_policy_kb]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Agent Runner
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _run_agent(doc_names: list[str], tools: list) -> dict:
+    """Create and invoke the LangChain tools agent."""
+    from langchain.agents import AgentExecutor, create_tool_calling_agent
+    from langchain_core.prompts import ChatPromptTemplate
+
+    llm = _build_llm()
+
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", _AGENT_SYSTEM_PROMPT),
+            ("human", _build_agent_input(doc_names)),
+            ("placeholder", "{agent_scratchpad}"),
+        ]
+    )
+
+    agent = create_tool_calling_agent(llm, tools, prompt)
+    executor = AgentExecutor(
+        agent=agent,
+        tools=tools,
+        verbose=False,
+        max_iterations=settings.AGENT_MAX_ITERATIONS,
+        return_intermediate_steps=True,
+        handle_parsing_errors=True,
+    )
+
+    logger.info("Invoking agent (max %d iterations)", settings.AGENT_MAX_ITERATIONS)
+    result = executor.invoke({"input": _build_agent_input(doc_names)})
+
+    doc_outputs: list[tuple[str, str]] = []
+    policy_outputs: list[tuple[str, str]] = []
+
+    for action, observation in result.get("intermediate_steps", []):
+        tool_name = action.tool
+        tool_input = action.tool_input
+        if tool_name == "retrieve_document_chunks":
+            doc_outputs.append(
+                (tool_input.get("filename", "unknown"), str(observation))
+            )
+        elif tool_name == "search_policy_kb":
+            policy_outputs.append(
+                (tool_input.get("query", "unknown"), str(observation))
+            )
+
     logger.info(
-        "Phase 3: policy gap context = %d chars (%d unique policy chunks from %d queries)",
-        len(context),
-        len(all_policy_chunks),
-        len(queries),
+        "Agent complete: %d doc calls, %d policy calls, "
+        "%d iterations, output=%d chars",
+        len(doc_outputs),
+        len(policy_outputs),
+        len(result.get("intermediate_steps", [])),
+        len(str(result.get("output", ""))),
     )
 
-    result = await asyncio.to_thread(
-        _invoke_structured, PHASE3_SYSTEM_PROMPT, context, PolicyGapResult
+    return {
+        "summary": str(result.get("output", "")),
+        "doc_outputs": doc_outputs,
+        "policy_outputs": policy_outputs,
+    }
+
+
+def _build_agent_input(doc_names: list[str]) -> str:
+    """Build the initial task description for the agent."""
+    names_str = "\n".join(f"  - {n}" for n in doc_names)
+    return (
+        f"Analyse the following project document(s):\n{names_str}\n\n"
+        f"Call retrieve_document_chunks() for each document, then use "
+        f"search_policy_kb() to find relevant organizational policies "
+        f"based on what you discover.  When finished, produce a summary "
+        f"of what you found."
     )
-    return result.missing_actions, result.missing_questions
 
 
-def _derive_policy_queries(doc_extractions: list[PerDocumentExtraction]) -> list[str]:
-    """Derive targeted FAISS search queries from Phase 1 extracted content."""
-    import re
-
-    combined_content: list[str] = []
-    capitalized: set[str] = set()
-
-    for ext in doc_extractions:
-        for f in ext.facts:
-            combined_content.append(f.content)
-        for d in ext.decisions:
-            combined_content.append(d.content)
-        for r in ext.risks:
-            combined_content.append(r.content)
-            if r.mitigation:
-                combined_content.append(r.mitigation)
-        for q in ext.open_questions:
-            combined_content.append(q.content)
-
-    queries: list[str] = []
-
-    # Broad query: all content concatenated (capped at ~2KB)
-    broad = " ".join(combined_content)[:2048]
-    if broad.strip():
-        queries.append(broad)
-
-    # Targeted queries: capitalized phrases (proper nouns, acronyms, standards)
-    for text in combined_content:
-        found = re.findall(
-            r"\b[A-Z][A-Za-z0-9\-]{1,}(?:\s+[A-Z][A-Za-z0-9\-]{1,}){0,2}\b", text
-        )
-        for phrase in found:
-            if len(phrase) > 3 and phrase.lower() not in {
-                "the",
-                "this",
-                "that",
-                "with",
-                "from",
-                "they",
-                "them",
-                "have",
-                "been",
-                "were",
-                "will",
-                "shall",
-                "must",
-                "each",
-            }:
-                capitalized.add(phrase)
-
-    for term in list(capitalized)[:3]:
-        if term not in broad:
-            queries.append(term)
-
-    logger.info("Phase 3: derived %d policy search queries", len(queries))
-    return queries
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Context Compiler
+# ═══════════════════════════════════════════════════════════════════════════════
 
 
-# ── Phase 4 — Summary Synthesis Implementation ────────────────────────────
-
-
-async def _phase4_synthesise_summary(
-    doc_extractions: list[PerDocumentExtraction],
-    conflicts: list,
-    missing_actions: list,
-    repeated: list,
-    missing_questions: list,
+async def _compile_context(
+    db: AsyncSession,
+    project_doc_ids: list[UUID],
+    agent_result: dict,
 ) -> str:
-    """Synthesise an executive summary from all previous phase outputs."""
-    parts = ["=== EXECUTIVE SUMMARY SYNTHESIS ===", ""]
+    """Compile context from agent tool outputs + fresh DB reads."""
+    parts: list[str] = []
 
-    parts.append("--- DOCUMENTS ANALYSED ---")
-    for ext in doc_extractions:
-        label = ext.facts[0].source_document if ext.facts else "Unknown"
-        parts.append(
-            f"'{label}' — {ext.document_type}: {len(ext.facts)} facts, "
-            f"{len(ext.decisions)} decisions, {len(ext.risks)} risks, "
-            f"{len(ext.assumptions)} assumptions, {len(ext.open_questions)} "
-            f"questions, {len(ext.action_items)} actions"
-        )
+    doc_data = await _fetch_document_data(db, project_doc_ids)
+    for filename, chunks in doc_data:
+        parts.append(f"[DOCUMENT: {filename}]")
+        for content, section_label in chunks:
+            parts.append(f"[SECTION: {section_label}]\n{content}\n")
+        parts.append("")
 
-    # Key high-confidence facts (limit 5)
-    high_facts = [f for d in doc_extractions for f in d.facts if f.confidence == "high"]
-    parts.append("\n--- KEY FACTS (high confidence) ---")
-    for f in high_facts[:5]:
-        parts.append(f"  [{f.source_document}] {f.content}")
-
-    # Key decisions (limit 5)
-    all_decisions = [d for d_ in doc_extractions for d in d_.decisions]
-    parts.append("\n--- KEY DECISIONS ---")
-    for d in all_decisions[:5]:
-        parts.append(f"  [{d.source_document}] {d.content}")
-
-    # Critical/high risks (limit 5)
-    high_risks = [
-        r
-        for d in doc_extractions
-        for r in d.risks
-        if r.severity in ("critical", "high")
-    ]
-    parts.append("\n--- KEY RISKS ---")
-    for r in high_risks[:5]:
-        parts.append(f"  [{r.source_document}] {r.content} (severity: {r.severity})")
-
-    # Conflicts
-    if conflicts:
-        parts.append(f"\n--- CONFLICTS DETECTED ({len(conflicts)}) ---")
-        for c in conflicts[:3]:
-            parts.append(f"  {c.document_a} vs {c.document_b}: {c.statement_a[:80]}...")
-    else:
-        parts.append("\n--- CONFLICTS DETECTED: 0 ---")
-
-    # Critical/high missing actions
-    urgent = [m for m in missing_actions if m.urgency in ("critical", "high")]
-    if urgent:
-        parts.append(f"\n--- CRITICAL/HIGH POLICY GAPS ({len(urgent)}) ---")
-        for m in urgent[:5]:
-            parts.append(f"  [{m.policy_reference}] {m.description[:100]}")
-    else:
-        parts.append(
-            f"\n--- POLICY GAPS: {len(missing_actions)} total, 0 critical/high ---"
-        )
-
-    # Repeated statements
-    if repeated:
-        parts.append(f"\n--- REPEATED STATEMENTS ({len(repeated)}) ---")
-        for r in repeated[:3]:
-            parts.append(f"  {r.document_a} ≅ {r.document_b}: {r.statement[:80]}...")
-    else:
-        parts.append("\n--- REPEATED STATEMENTS: 0 ---")
-
-    # Missing questions
-    urgent_q = [q for q in missing_questions if q.urgency in ("critical", "high")]
-    if urgent_q:
-        parts.append(
-            f"\n--- MISSED QUESTIONS FROM POLICIES ({len(urgent_q)} critical/high) ---"
-        )
-        for q in urgent_q[:3]:
-            parts.append(f"  [{q.policy_reference}] {q.question[:100]}")
-    else:
-        parts.append(
-            f"\n--- MISSED QUESTIONS: {len(missing_questions)} total, 0 critical/high ---"
-        )
+    seen: set[str] = set()
+    for _, output in agent_result.get("policy_outputs", []):
+        for line in output.split("\n"):
+            line = line.strip()
+            if line.startswith("[POLICY:") and "[SECTION:" in line:
+                if line not in seen:
+                    seen.add(line)
+                    parts.append(line)
 
     context = "\n".join(parts)
-    logger.info("Phase 4: summary context = %d chars", len(context))
-
-    result = await asyncio.to_thread(
-        _invoke_structured, PHASE4_SYSTEM_PROMPT, context, SummaryResult
-    )
-    return result.summary
+    logger.info("Compiled context: %d chars", len(context))
+    return context
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -534,11 +369,7 @@ async def _phase4_synthesise_summary(
 
 
 def _build_llm():
-    """Create a fresh ChatOllama instance with project settings.
-
-    Returns a new instance each call — LangChain chat models are not
-    thread-safe for concurrent use across asyncio.to_thread workers.
-    """
+    """Create a fresh ChatOllama instance with project settings."""
     from langchain_ollama import ChatOllama
 
     return ChatOllama(
@@ -555,20 +386,7 @@ def _invoke_structured(
     context: str,
     schema: type,
 ):
-    """Invoke ChatOllama with structured output bound to *schema*.
-
-    Args:
-        system_prompt: The system message for this phase.
-        context: The formatted context string.
-        schema: A Pydantic model class for with_structured_output().
-
-    Returns:
-        An instance of *schema* parsed from the LLM's JSON response.
-
-    Raises:
-        RuntimeError: If the LLM is unreachable, times out, or returns
-            unparseable output.
-    """
+    """Invoke ChatOllama with structured output bound to *schema*."""
     from langchain_core.prompts import ChatPromptTemplate
 
     llm = _build_llm()
@@ -597,11 +415,7 @@ async def _fetch_document_data(
     db: AsyncSession,
     doc_ids: list[UUID],
 ) -> list[tuple[str, list[tuple[str, str]]]]:
-    """Fetch chunks for each document, ordered by chunk_index.
-
-    Returns:
-        List of (filename, [(content, section_label), ...]) in doc_ids order.
-    """
+    """Fetch chunks for each document, ordered by chunk_index."""
     doc_result = await db.execute(
         select(KnowledgeDocument).where(KnowledgeDocument.id.in_(doc_ids))
     )
@@ -614,7 +428,6 @@ async def _fetch_document_data(
         doc = docs_by_id.get(doc_id)
         if doc is None:
             continue
-
         chunks_result = await db.execute(
             select(DocumentChunk)
             .where(DocumentChunk.document_id == doc_id)
@@ -633,12 +446,7 @@ async def _fetch_document_data(
 
 
 def _format_section_label(chunk_index: int, metadata: dict | None) -> str:
-    """Build a human-readable section label from chunk_index and loader metadata.
-
-    Examples:
-        "chunk 3 (page 2)"     — PDF with page number
-        "chunk 7"              — plain text, no metadata
-    """
+    """Build a human-readable section label from chunk_index and metadata."""
     label = f"chunk {chunk_index}"
     if metadata:
         page = metadata.get("page") or metadata.get("page_number")
@@ -653,14 +461,7 @@ async def _search_policy_chunks(
     exclude_doc_ids: list[UUID],
     top_k: int,
 ) -> list[tuple[int, str, dict | None, str]]:
-    """Semantically search FAISS for policy chunks and filter to public docs.
-
-    Searches for 2× top_k to allow for post-filtering, then takes the top_k
-    after removing private and project-owned documents.
-
-    Returns:
-        List of (chunk_index, content, metadata_json, parent_filename).
-    """
+    """Semantically search FAISS for policy chunks and filter to public docs."""
     from app.services.faiss_service import get_faiss_service
     from app.services.vectorization import _get_embedding_model
 
