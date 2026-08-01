@@ -24,6 +24,7 @@ from app.dependencies import get_current_user, get_db
 from app.models.knowledge import KnowledgeDocument
 from app.models.project import Project
 from app.models.user import User
+from app.schemas.extraction import ExtractionResult
 from app.schemas.project import (
     ProjectDocumentRef,
     ProjectListResponse,
@@ -312,3 +313,75 @@ async def list_projects(
         project_responses.append(_project_to_response(p, doc_refs))
 
     return ProjectListResponse(projects=project_responses, total=total)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  POST /projects/{project_id}/analyze
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@router.post(
+    "/{project_id}/analyze",
+    response_model=ExtractionResult,
+    summary="Run AI extraction on a project's documents",
+)
+async def analyze_project(
+    project_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Analyze up to three project documents using the LangChain/Ollama pipeline.
+
+    Retrieves pre-vectorized document chunks from pgvector, searches for
+    relevant organizational policy chunks via FAISS, then runs a local LLM
+    (Qwen3 7B via Ollama) to extract facts, decisions, assumptions, risks,
+    open questions, action items, cross-document conflicts, and policy-gap
+    missing actions.
+
+    All extracted items carry ``source_document`` and ``source_section``
+    metadata so the frontend can highlight the originating text inline.
+
+    Returns 409 if any project document is still indexing.  Returns 502 if
+    the LLM is unreachable or fails.
+    """
+    # 1. Fetch project and verify ownership
+    result = await db.execute(select(Project).where(Project.id == project_id))
+    project = result.scalar_one_or_none()
+    if project is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Project not found.",
+        )
+
+    # Verify ownership — only the creator can analyse their project
+    if project.created_by != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to analyse this project.",
+        )
+
+    # 2. Verify all documents have finished ingestion
+    doc_refs = await _resolve_documents(db, project.document_ids)
+    unindexed = [d for d in doc_refs if d.status != "indexed"]
+    if unindexed:
+        names = ", ".join(f"'{d.filename}' ({d.status})" for d in unindexed)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Cannot analyse project — {len(unindexed)} document(s) still "
+                f"processing: {names}.  Wait for ingestion to complete and try again."
+            ),
+        )
+
+    # 3. Run the 4-phase extraction pipeline (orchestrated internally)
+    from app.services.extraction import run_extraction
+
+    try:
+        extraction_result = await run_extraction(db, project.document_ids)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        )
+
+    return extraction_result

@@ -53,6 +53,14 @@ class Settings(BaseSettings):
     SEARCH_TOP_K: int = 5
     INGESTION_TIMEOUT_SECONDS: int = 600  # 10 min — covers first-run model download
 
+    # ── LLM / Extraction ───────────────────────────────────────────────
+    OLLAMA_BASE_URL: str = "http://localhost:11434"
+    OLLAMA_MODEL: str = "qwen3:7b"
+    OLLAMA_NUM_CTX: int = 8192  # context window size (tokens)
+    OLLAMA_NUM_PREDICT: int = 4096  # max output tokens
+    EXTRACTION_CHUNKS_PER_DOC: int = 15  # max chunks retrieved per project document
+    EXTRACTION_POLICY_TOP_K: int = 10  # max policy chunks from FAISS search
+
 
 # Singleton instance — import this everywhere
 settings = Settings()
