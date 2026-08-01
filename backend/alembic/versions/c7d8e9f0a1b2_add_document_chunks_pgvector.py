@@ -73,13 +73,11 @@ def upgrade() -> None:
     # IVFFlat index for approximate nearest-neighbour search on embeddings.
     # Uses cosine distance operator (<=>) which maps to inner product for
     # normalized vectors.  Lists=100 is fine for up to ~100K chunks.
-    op.execute(
-        """
+    op.execute("""
         CREATE INDEX ix_document_chunks_embedding
         ON document_chunks
         USING hnsw (embedding vector_cosine_ops)
-        """
-    )
+        """)
 
 
 def downgrade() -> None:

@@ -229,7 +229,7 @@ export default function Knowledge() {
             // Lightweight refresh — silently updates docs without full skeleton
             getDocuments()
                 .then(({ documents: docs }) => setDocuments(docs))
-                .catch(() => {}); // Silently ignore poll errors
+                .catch(() => { }); // Silently ignore poll errors
         }, 3000);
 
         return () => clearInterval(interval);

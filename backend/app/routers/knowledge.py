@@ -144,7 +144,8 @@ async def upload_document(
             import logging
 
             logging.getLogger(__name__).exception(
-                "Background ingestion failed for document %s", doc.id,
+                "Background ingestion failed for document %s",
+                doc.id,
             )
 
     asyncio.create_task(_safe_ingest())

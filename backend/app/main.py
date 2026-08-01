@@ -35,6 +35,7 @@ async def lifespan(app: FastAPI):
             # migrations), log and continue — the index will be populated on
             # first ingestion.
             import logging
+
             logging.getLogger(__name__).warning(
                 "FAISS index build skipped — table may not exist yet."
             )

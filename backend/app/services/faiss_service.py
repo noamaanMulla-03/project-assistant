@@ -41,9 +41,7 @@ class FAISSService:
 
     def __init__(self) -> None:
         # FAISS IndexFlatIP gives cosine similarity when vectors are L2-normalized
-        self._index: faiss.IndexIDMap = faiss.IndexIDMap(
-            faiss.IndexFlatIP(_DIM)
-        )
+        self._index: faiss.IndexIDMap = faiss.IndexIDMap(faiss.IndexFlatIP(_DIM))
         # Bidirectional mapping: chunk UUID ↔ FAISS internal int64 ID
         self._uuid_to_faiss: dict[UUID, int] = {}
         self._faiss_to_uuid: dict[int, UUID] = {}
@@ -70,9 +68,7 @@ class FAISSService:
 
         Called once during application startup.  Clears any existing index state.
         """
-        result = await db.execute(
-            select(DocumentChunk.id, DocumentChunk.embedding)
-        )
+        result = await db.execute(select(DocumentChunk.id, DocumentChunk.embedding))
         rows = result.all()
 
         if not rows:
@@ -108,9 +104,7 @@ class FAISSService:
 
     # ── Incremental Add ───────────────────────────────────────────────────
 
-    def add_chunks(
-        self, chunk_ids_and_vectors: list[tuple[UUID, list[float]]]
-    ) -> None:
+    def add_chunks(self, chunk_ids_and_vectors: list[tuple[UUID, list[float]]]) -> None:
         """Add new chunk vectors to the FAISS index after ingestion.
 
         Args:
@@ -138,9 +132,7 @@ class FAISSService:
 
     # ── Remove by Document ────────────────────────────────────────────────
 
-    async def remove_document(
-        self, doc_id: UUID, db: AsyncSession
-    ) -> None:
+    async def remove_document(self, doc_id: UUID, db: AsyncSession) -> None:
         """Remove all chunks belonging to a deleted document from the FAISS index.
 
         Called after deleting a KnowledgeDocument.  The chunk rows in pgvector
@@ -165,9 +157,7 @@ class FAISSService:
 
         # Re-query to get chunk IDs for this document
         result = await db.execute(
-            select(DocumentChunk.id).where(
-                DocumentChunk.document_id == doc_id
-            )
+            select(DocumentChunk.id).where(DocumentChunk.document_id == doc_id)
         )
         chunk_ids = [row[0] for row in result.all()]
 
@@ -198,9 +188,7 @@ class FAISSService:
 
     # ── Search ────────────────────────────────────────────────────────────
 
-    def search(
-        self, query_embedding: list[float], k: int
-    ) -> list[tuple[UUID, float]]:
+    def search(self, query_embedding: list[float], k: int) -> list[tuple[UUID, float]]:
         """Find the top-k most similar chunk embeddings by cosine similarity.
 
         Args:
