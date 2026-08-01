@@ -1,0 +1,33 @@
+# ── Dependencies ──────────────────────────────────────────────────────────
+node_modules/
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# ── Build output ──────────────────────────────────────────────────────────
+dist/
+build/
+
+# ── Environment ───────────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ── IDE ───────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS ────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Docker ────────────────────────────────────────────────────────────────
+pgdata/
+
+# ── Alembic (keep migration files, ignore pycache) ────────────────────────
+backend/alembic/__pycache__/
+backend/alembic/versions/__pycache__/
