@@ -1,5 +1,5 @@
 // ── Project API Client ───────────────────────────────────────────────────────
-// Typed functions for creating and fetching multi-document projects.
+// Typed functions for creating, fetching, and analysing multi-document projects.
 // Uses the configured axios instance for auth (same as api/knowledge.ts).
 
 import apiClient from "./client";
@@ -25,6 +25,99 @@ export interface ProjectResponse {
 export interface ProjectListResponse {
 	projects: ProjectResponse[];
 	total: number;
+}
+
+// ── Extraction Result Types (mirrors backend schemas/extraction.py) ──────────
+
+export interface Fact {
+	content: string;
+	source_document: string;
+	source_section: string;
+	confidence: "high" | "medium" | "low";
+}
+
+export interface Decision {
+	content: string;
+	source_document: string;
+	source_section: string;
+	stakeholders: string[];
+}
+
+export interface Assumption {
+	content: string;
+	source_document: string;
+	source_section: string;
+	validation_needed: boolean;
+}
+
+export interface Risk {
+	content: string;
+	source_document: string;
+	source_section: string;
+	severity: "critical" | "high" | "medium" | "low";
+	mitigation: string;
+}
+
+export interface OpenQuestion {
+	content: string;
+	source_document: string;
+	source_section: string;
+	suggested_owner: string;
+}
+
+export interface ActionItem {
+	content: string;
+	source_document: string;
+	source_section: string;
+	priority: "high" | "medium" | "low";
+	deadline: string;
+}
+
+export interface DocumentConflict {
+	statement_a: string;
+	statement_b: string;
+	document_a: string;
+	document_b: string;
+	section_a: string;
+	section_b: string;
+	resolution_suggestion: string;
+}
+
+export interface RepeatedStatement {
+	statement: string;
+	document_a: string;
+	document_b: string;
+	section_a: string;
+	section_b: string;
+	is_exact_match: boolean;
+}
+
+export interface MissingAction {
+	description: string;
+	policy_reference: string;
+	policy_section: string;
+	urgency: "critical" | "high" | "medium" | "low";
+}
+
+export interface MissingQuestion {
+	question: string;
+	policy_reference: string;
+	policy_section: string;
+	urgency: "critical" | "high" | "medium" | "low";
+}
+
+export interface ExtractionResult {
+	summary: string;
+	facts: Fact[];
+	decisions: Decision[];
+	assumptions: Assumption[];
+	risks: Risk[];
+	open_questions: OpenQuestion[];
+	action_items: ActionItem[];
+	document_conflicts: DocumentConflict[];
+	missing_actions: MissingAction[];
+	missing_questions: MissingQuestion[];
+	repeated_statements: RepeatedStatement[];
 }
 
 // ── API Functions ────────────────────────────────────────────────────────────
@@ -58,5 +151,13 @@ export async function listProjects(
 	const { data } = await apiClient.get<ProjectListResponse>("/projects", {
 		params: { skip, limit },
 	});
+	return data;
+}
+
+/** Run AI extraction on a project's documents.  Returns the full structured payload. */
+export async function analyzeProject(id: string): Promise<ExtractionResult> {
+	const { data } = await apiClient.post<ExtractionResult>(
+		`/projects/${id}/analyze`,
+	);
 	return data;
 }

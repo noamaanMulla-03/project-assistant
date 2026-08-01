@@ -7,9 +7,10 @@
 // ALLOWED_EXTENSIONS_LABEL) to keep UI formatting consistent.
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { GlowingEffectCard } from "../components/ui/glowing-effect";
 import { cn } from "../components/utils";
-import { createProject, getProject, type ProjectDocumentRef, type ProjectResponse } from "../api/project";
+import { analyzeProject, createProject, getProject, type ProjectDocumentRef, type ProjectResponse } from "../api/project";
 import {
     ALLOWED_EXTENSIONS_LABEL,
     formatBytes,
@@ -253,9 +254,11 @@ function UploadSlot({ index, file, docRef, onSelect, onRemove, disabled }: SlotP
 // ═══════════════════════════════════════════════════════════════════════════════
 
 export default function ProjectNew() {
+    const navigate = useNavigate();
     const [files, setFiles] = useState<(File | null)[]>(Array(SLOT_COUNT).fill(null));
     const [project, setProject] = useState<ProjectResponse | null>(null);
     const [isUploading, setIsUploading] = useState(false);
+    const [isAnalyzing, setIsAnalyzing] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
     // ── Poll ingestion status until all docs are indexed ──────────────────
@@ -308,11 +311,29 @@ export default function ProjectNew() {
         try {
             const proj = await createProject(selectedFiles);
             setProject(proj);
-            setFiles(Array(SLOT_COUNT).fill(null)); // Clear files, use docRefs from now on
+            setFiles(Array(SLOT_COUNT).fill(null));
         } catch (err: unknown) {
             setError(err instanceof Error ? err.message : "Upload failed. Please try again.");
         } finally {
             setIsUploading(false);
+        }
+    };
+
+    // ── Start AI analysis ───────────────────────────────────────────────
+    const handleAnalyze = async () => {
+        if (!project?.id) return;
+        setIsAnalyzing(true);
+        setError(null);
+        try {
+            await analyzeProject(project.id);
+            navigate(`/project/${project.id}/results`, { replace: true });
+        } catch (err: unknown) {
+            const detail =
+                (err as { response?: { data?: { detail?: string } } })?.response?.data
+                    ?.detail ?? "Analysis failed. Is Ollama running?";
+            setError(detail);
+        } finally {
+            setIsAnalyzing(false);
         }
     };
 
@@ -402,15 +423,20 @@ export default function ProjectNew() {
                     {project && (
                         <button
                             type="button"
-                            disabled={!isReady}
+                            onClick={handleAnalyze}
+                            disabled={!isReady || isAnalyzing}
                             className={cn(
                                 "inline-flex items-center gap-2 rounded-xl px-8 py-3 text-sm font-semibold transition-all",
-                                isReady
+                                isReady && !isAnalyzing
                                     ? "bg-gradient-to-r from-indigo-600 to-violet-600 text-white hover:from-indigo-700 hover:to-violet-700 shadow-lg shadow-indigo-500/25 active:scale-[0.98]"
                                     : "cursor-not-allowed border-2 border-surface-300 bg-transparent text-surface-400 dark:border-surface-dark-700 dark:text-surface-dark-500",
                             )}
                         >
-                            {isPolling ? (
+                            {isAnalyzing ? (
+                                <>
+                                    <Spinner /> Analyzing...
+                                </>
+                            ) : isPolling ? (
                                 <>
                                     <Spinner /> Indexing documents...
                                 </>
@@ -428,13 +454,15 @@ export default function ProjectNew() {
 
                     {project && (
                         <p className="text-xs text-surface-400 dark:text-surface-dark-500">
-                            {isPolling
-                                ? "Documents are being processed. This may take a minute for large files."
-                                : isReady
-                                    ? "All documents indexed — ready for AI analysis."
-                                    : hasError
-                                        ? "One or more documents failed to index. Remove the project and try again."
-                                        : ""
+                            {isAnalyzing
+                                ? "AI analysis in progress — this may take 20-40 seconds for large documents."
+                                : isPolling
+                                    ? "Documents are being processed. This may take a minute for large files."
+                                    : isReady
+                                        ? "All documents indexed — ready for AI analysis."
+                                        : hasError
+                                            ? "One or more documents failed to index. Remove the project and try again."
+                                            : ""
                             }
                         </p>
                     )}

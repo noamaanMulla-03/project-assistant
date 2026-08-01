@@ -88,8 +88,22 @@ def generate_tokens(user: User) -> dict:
 
 
 async def blacklist_token(db: AsyncSession, jti: str, expires_at: datetime) -> None:
-    """Insert a JWT ID into the blacklist so it can't be reused."""
-    db.add(TokenBlacklist(jti=jti, expires_at=expires_at))
+    """Insert a JWT ID into the blacklist so it can't be reused.
+
+    Uses INSERT ... ON CONFLICT DO NOTHING so concurrent refresh calls or
+    re-sent cookies don't crash with a UniqueViolationError.  If the jti
+    was already blacklisted by another request, this is a silent no-op.
+    """
+    from sqlalchemy import text
+
+    await db.execute(
+        text(
+            "INSERT INTO token_blacklist (id, jti, expires_at) "
+            "VALUES (gen_random_uuid(), :jti, :expires_at) "
+            "ON CONFLICT (jti) DO NOTHING"
+        ),
+        {"jti": jti, "expires_at": expires_at},
+    )
     await db.flush()
 
 

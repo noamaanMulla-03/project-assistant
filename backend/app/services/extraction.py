@@ -75,20 +75,20 @@ async def run_extraction(
     logger.info("Phase 1: extracting %d document(s) in parallel", len(project_doc_ids))
     doc_extractions = await _phase1_extract_all(db, project_doc_ids)
 
-    # ── Phase 2: Cross-document conflict detection ─────────────────────────
-    logger.info("Phase 2: detecting cross-document conflicts")
-    conflicts = await _phase2_detect_conflicts(doc_extractions)
+    # ── Phase 2: Cross-document conflict + repeat detection ────────────────
+    logger.info("Phase 2: detecting cross-document conflicts and repeats")
+    conflicts, repeated = await _phase2_detect_conflicts(doc_extractions)
 
     # ── Phase 3: Policy gap analysis ───────────────────────────────────────
     logger.info("Phase 3: analysing policy gaps")
-    missing_actions = await _phase3_analyse_policy_gaps(
+    missing_actions, missing_questions = await _phase3_analyse_policy_gaps(
         db, doc_extractions, project_doc_ids
     )
 
     # ── Phase 4: Executive summary synthesis ───────────────────────────────
     logger.info("Phase 4: synthesising executive summary")
     summary = await _phase4_synthesise_summary(
-        doc_extractions, conflicts, missing_actions
+        doc_extractions, conflicts, missing_actions, repeated, missing_questions
     )
 
     # ── Assemble final result ──────────────────────────────────────────────
@@ -102,10 +102,13 @@ async def run_extraction(
         action_items=[a for d in doc_extractions for a in d.action_items],
         document_conflicts=conflicts,
         missing_actions=missing_actions,
+        missing_questions=missing_questions,
+        repeated_statements=repeated,
     )
     logger.info(
         "Pipeline complete: %d facts, %d decisions, %d assumptions, "
-        "%d risks, %d questions, %d actions, %d conflicts, %d missing",
+        "%d risks, %d questions, %d actions, %d conflicts, %d missing "
+        "actions, %d missing questions, %d repeats",
         len(result.facts),
         len(result.decisions),
         len(result.assumptions),
@@ -114,6 +117,8 @@ async def run_extraction(
         len(result.action_items),
         len(result.document_conflicts),
         len(result.missing_actions),
+        len(result.missing_questions),
+        len(result.repeated_statements),
     )
     return result
 
@@ -170,16 +175,24 @@ CRITICAL RULES:
 
 PHASE2_SYSTEM_PROMPT = """\
 You are a human-in-the-loop document reviewer. You are given structured \
-summaries of findings extracted from multiple project documents. Your ONLY \
-job is to find statements that contradict each other across documents.
+summaries of findings extracted from multiple project documents. Your jobs:
 
-For each conflict found, provide:
-- statement_a / statement_b: the two contradictory statements
-- document_a / document_b: which document each statement came from
-- section_a / section_b: the section within each document
-- resolution_suggestion: how a human reviewer might resolve this (or "" if unclear)
+1. Find CONFLICTS — statements that contradict each other across documents.
+   For each conflict, provide:
+   - statement_a / statement_b: the two contradictory statements
+   - document_a / document_b: which document each statement came from
+   - section_a / section_b: the section within each document
+   - resolution_suggestion: how a human reviewer might resolve this (or "" if unclear)
 
-If no conflicts exist, return an empty list.  Do NOT fabricate conflicts.
+2. Find REPEATED STATEMENTS — identical or substantially similar statements
+   that appear in two different documents.  These are NOT contradictions;
+   they are the same information stated twice.  For each repeated statement:
+   - statement: the repeated content
+   - document_a / document_b: which documents contain it
+   - section_a / section_b: the sections within each document
+   - is_exact_match: true if word-for-word identical, false if substantially same
+
+If nothing is found, return empty lists.  Do NOT fabricate items.
 """
 
 PHASE3_SYSTEM_PROMPT = """\
@@ -187,17 +200,24 @@ You are a human-in-the-loop compliance reviewer. You are given:
   1. Structured findings extracted from project documents.
   2. Relevant chunks from organizational policies and standards.
 
-Your ONLY job is to identify actions that SHOULD exist in the project \
-documents based on the policies, but are currently MISSING.
+Your jobs:
 
-For each missing action, provide:
+1. Identify MISSING ACTIONS — things that SHOULD exist in the project \
+documents based on the policies, but are currently ABSENT.  For each:
 - description: what needs to be done
 - policy_reference: the policy filename that mandates this
 - policy_section: the section/chunk in the policy
 - urgency: 'critical' | 'high' | 'medium' | 'low' based on policy language
 
-Do NOT suggest actions the policies don't actually require.  If the policies \
-don't reveal any gaps, return an empty list.
+2. Identify MISSING QUESTIONS — questions the project documents SHOULD be \
+asking based on the policies, but aren't.  For each:
+- question: the question that should be asked
+- policy_reference: the policy filename that implies this question
+- policy_section: the section/chunk in the policy
+- urgency: 'critical' | 'high' | 'medium' | 'low'
+
+Do NOT suggest actions or questions the policies don't actually require.  \
+If the policies don't reveal any gaps, return empty lists.
 """
 
 PHASE4_SYSTEM_PROMPT = """\
@@ -209,7 +229,8 @@ executive summary (150-300 words) covering:
 2. Key themes and notable facts.
 3. The most important risks and decisions identified.
 4. Any cross-document conflicts detected.
-5. Critical policy gaps that need attention.
+5. Any repeated statements found across documents.
+6. Critical policy gaps (missing actions and missed questions) that need attention.
 
 Write in clear, professional prose.  Do NOT use bullet points — this is a \
 narrative summary for a human reviewer.
@@ -252,11 +273,15 @@ async def _phase1_extract_one(
 
 async def _phase2_detect_conflicts(
     doc_extractions: list[PerDocumentExtraction],
-) -> list:
-    """Detect contradictions between documents using structured Phase 1 findings."""
+) -> tuple[list, list]:
+    """Detect contradictions and repeated statements between documents.
+
+    Returns:
+        (conflicts, repeated_statements) — two lists, each may be empty.
+    """
     if len(doc_extractions) < 2:
         logger.info("Phase 2: skipped — only %d document(s)", len(doc_extractions))
-        return []
+        return [], []
 
     parts = ["=== CROSS-DOCUMENT CONFLICT ANALYSIS ===", ""]
     for i, ext in enumerate(doc_extractions):
@@ -282,7 +307,7 @@ async def _phase2_detect_conflicts(
     result = await asyncio.to_thread(
         _invoke_structured, PHASE2_SYSTEM_PROMPT, context, ConflictDetectionResult
     )
-    return result.conflicts
+    return result.conflicts, result.repeated_statements
 
 
 # ── Phase 3 — Policy Gap Analysis Implementation ──────────────────────────
@@ -292,9 +317,12 @@ async def _phase3_analyse_policy_gaps(
     db: AsyncSession,
     doc_extractions: list[PerDocumentExtraction],
     project_doc_ids: list[UUID],
-) -> list:
-    """Identify missing actions by comparing project findings against policies."""
-    # Derive targeted search queries from Phase 1 content
+) -> tuple[list, list]:
+    """Identify missing actions and questions by comparing project findings against policies.
+
+    Returns:
+        (missing_actions, missing_questions) — two lists, each may be empty.
+    """
     queries = _derive_policy_queries(doc_extractions)
 
     # Search FAISS for each query, deduplicate
@@ -310,7 +338,7 @@ async def _phase3_analyse_policy_gaps(
 
     if not all_policy_chunks:
         logger.info("Phase 3: no relevant policy chunks found — skipping")
-        return []
+        return [], []
 
     # Format project findings summary
     parts = ["=== POLICY GAP ANALYSIS ===", "", "--- PROJECT FINDINGS ---"]
@@ -344,7 +372,7 @@ async def _phase3_analyse_policy_gaps(
     result = await asyncio.to_thread(
         _invoke_structured, PHASE3_SYSTEM_PROMPT, context, PolicyGapResult
     )
-    return result.missing_actions
+    return result.missing_actions, result.missing_questions
 
 
 def _derive_policy_queries(doc_extractions: list[PerDocumentExtraction]) -> list[str]:
@@ -412,6 +440,8 @@ async def _phase4_synthesise_summary(
     doc_extractions: list[PerDocumentExtraction],
     conflicts: list,
     missing_actions: list,
+    repeated: list,
+    missing_questions: list,
 ) -> str:
     """Synthesise an executive summary from all previous phase outputs."""
     parts = ["=== EXECUTIVE SUMMARY SYNTHESIS ===", ""]
@@ -466,6 +496,27 @@ async def _phase4_synthesise_summary(
     else:
         parts.append(
             f"\n--- POLICY GAPS: {len(missing_actions)} total, 0 critical/high ---"
+        )
+
+    # Repeated statements
+    if repeated:
+        parts.append(f"\n--- REPEATED STATEMENTS ({len(repeated)}) ---")
+        for r in repeated[:3]:
+            parts.append(f"  {r.document_a} ≅ {r.document_b}: {r.statement[:80]}...")
+    else:
+        parts.append("\n--- REPEATED STATEMENTS: 0 ---")
+
+    # Missing questions
+    urgent_q = [q for q in missing_questions if q.urgency in ("critical", "high")]
+    if urgent_q:
+        parts.append(
+            f"\n--- MISSED QUESTIONS FROM POLICIES ({len(urgent_q)} critical/high) ---"
+        )
+        for q in urgent_q[:3]:
+            parts.append(f"  [{q.policy_reference}] {q.question[:100]}")
+    else:
+        parts.append(
+            f"\n--- MISSED QUESTIONS: {len(missing_questions)} total, 0 critical/high ---"
         )
 
     context = "\n".join(parts)

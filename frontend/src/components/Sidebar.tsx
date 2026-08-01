@@ -6,11 +6,12 @@
 //   - Bottom section with user avatar, theme toggle, and logout
 //   - All icons are inline SVGs — no external icon library
 
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import { motion, useMotionValue, useSpring, useTransform } from "motion/react";
 import { useAuth } from "../context/AuthContext";
 import { useTheme } from "../context/ThemeContext";
+import { listProjects, type ProjectResponse } from "../api/project";
 import { cn } from "../components/utils";
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -247,6 +248,17 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
     const { theme, toggle: toggleTheme } = useTheme();
     const navigate = useNavigate();
 
+    // ── Projects list for sidebar nav ───────────────────────────────────
+    const [projects, setProjects] = useState<ProjectResponse[]>([]);
+
+    useEffect(() => {
+        let cancelled = false;
+        listProjects(0, 10).then((res) => {
+            if (!cancelled) setProjects(res.projects);
+        }).catch(() => { });
+        return () => { cancelled = true; };
+    }, []);
+
     // ── Spring-animated width for smooth expand / collapse ────────────────
     const widthMotion = useMotionValue(collapsed ? COLLAPSED_W : EXPANDED_W);
     const springWidth = useSpring(widthMotion, {
@@ -373,6 +385,43 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
                     icon={<KnowledgeIcon />}
                     collapsed={collapsed}
                 />
+
+                {/* Projects section — only shown when expanded */}
+                {!collapsed && (projects ?? []).length > 0 && (
+                    <div className="pt-3">
+                        <div className="mb-1 px-1 text-[10px] font-semibold uppercase tracking-wider text-surface-400 dark:text-surface-dark-500">
+                            Projects
+                        </div>
+                        {(projects ?? []).map((p) => (
+                            <NavLink
+                                key={p.id}
+                                to={`/project/${p.id}`}
+                                className={({ isActive }) =>
+                                    cn(
+                                        "flex items-center gap-2 rounded-lg px-2 py-1.5 text-xs transition-colors",
+                                        isActive
+                                            ? "bg-indigo-50 text-indigo-600 dark:bg-indigo-950/50 dark:text-indigo-300"
+                                            : "text-surface-500 hover:bg-surface-100 hover:text-surface-700 dark:text-surface-dark-400 dark:hover:bg-surface-dark-800 dark:hover:text-surface-dark-200",
+                                    )
+                                }
+                            >
+                                <span
+                                    className={cn(
+                                        "h-1.5 w-1.5 rounded-full",
+                                        p.status === "ready"
+                                            ? "bg-emerald-400"
+                                            : p.status === "error"
+                                                ? "bg-red-400"
+                                                : "bg-amber-400",
+                                    )}
+                                />
+                                <span className="truncate">
+                                    {p.documents.length} doc{p.documents.length !== 1 ? "s" : ""} · {p.status === "ready" ? "Ready" : p.status === "error" ? "Error" : "Indexing"}
+                                </span>
+                            </NavLink>
+                        ))}
+                    </div>
+                )}
             </nav>
 
             {/* ════ Bottom Section: User + Actions ════ */}

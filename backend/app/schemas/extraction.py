@@ -143,6 +143,36 @@ class DocumentConflict(BaseModel):
     )
 
 
+class RepeatedStatement(BaseModel):
+    """A statement that appears identically or substantially similarly in
+    two different project documents."""
+
+    statement: str = Field(
+        ...,
+        description="The repeated content (verbatim or lightly paraphrased)",
+    )
+    document_a: str = Field(
+        ...,
+        description="Filename of the first document containing this statement",
+    )
+    document_b: str = Field(
+        ...,
+        description="Filename of the second document containing this statement",
+    )
+    section_a: str = Field(
+        ...,
+        description="Section identifier in document_a",
+    )
+    section_b: str = Field(
+        ...,
+        description="Section identifier in document_b",
+    )
+    is_exact_match: bool = Field(
+        default=False,
+        description="True if the statements are word-for-word identical",
+    )
+
+
 class MissingAction(BaseModel):
     """An action that is missing from the project documents but should exist
     based on organizational policies and standards."""
@@ -154,6 +184,28 @@ class MissingAction(BaseModel):
     policy_reference: str = Field(
         ...,
         description="The policy document filename that mandates this action",
+    )
+    policy_section: str = Field(
+        ...,
+        description="Section/chunk identifier in the policy document",
+    )
+    urgency: str = Field(
+        ...,
+        description="Urgency: 'critical' | 'high' | 'medium' | 'low'",
+    )
+
+
+class MissingQuestion(BaseModel):
+    """A question that the project documents SHOULD be asking based on
+    organizational policies, but currently aren't."""
+
+    question: str = Field(
+        ...,
+        description="The question that should be asked but isn't",
+    )
+    policy_reference: str = Field(
+        ...,
+        description="The policy document filename that implies this question",
     )
     policy_section: str = Field(
         ...,
@@ -196,7 +248,7 @@ class PerDocumentExtraction(BaseModel):
 
 
 class ConflictDetectionResult(BaseModel):
-    """Phase 2 output: contradictions found between project documents.
+    """Phase 2 output: contradictions and repeated statements across documents.
 
     The LLM receives only structured summaries from Phase 1 (not raw chunks)
     so it can reason clearly about conflicts without re-reading source text.
@@ -206,12 +258,17 @@ class ConflictDetectionResult(BaseModel):
         default_factory=list,
         description="Contradictory statements found across the provided document summaries",
     )
+    repeated_statements: list[RepeatedStatement] = Field(
+        default_factory=list,
+        description="Identical or substantially similar statements found in multiple documents",
+    )
 
     model_config = {"extra": "forbid"}
 
 
 class PolicyGapResult(BaseModel):
-    """Phase 3 output: actions missing from project docs based on policy.
+    """Phase 3 output: actions and questions missing from project docs
+    based on organizational policies.
 
     The LLM receives Phase 1 findings plus policy chunks retrieved by the
     backend using keywords derived from the extracted content.
@@ -220,6 +277,10 @@ class PolicyGapResult(BaseModel):
     missing_actions: list[MissingAction] = Field(
         default_factory=list,
         description="Actions that should exist based on policy but are absent from project docs",
+    )
+    missing_questions: list[MissingQuestion] = Field(
+        default_factory=list,
+        description="Questions the project should be asking based on policy but isn't",
     )
 
     model_config = {"extra": "forbid"}
@@ -291,6 +352,14 @@ class ExtractionResult(BaseModel):
     missing_actions: list[MissingAction] = Field(
         default_factory=list,
         description="Actions missing from the project documents based on applicable policies",
+    )
+    missing_questions: list[MissingQuestion] = Field(
+        default_factory=list,
+        description="Questions the project should be asking based on applicable policies",
+    )
+    repeated_statements: list[RepeatedStatement] = Field(
+        default_factory=list,
+        description="Identical or substantially similar statements found across multiple documents",
     )
 
     model_config = {"extra": "forbid"}
