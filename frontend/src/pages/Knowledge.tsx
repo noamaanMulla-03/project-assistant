@@ -137,6 +137,44 @@ function Spinner({ className }: { className?: string }) {
     );
 }
 
+function CheckIcon({ className }: { className?: string }) {
+    return (
+        <svg
+            className={className}
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+        >
+            <polyline points="20,6 9,17 4,12" />
+        </svg>
+    );
+}
+
+function AlertIcon({ className }: { className?: string }) {
+    return (
+        <svg
+            className={className}
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+        >
+            <circle cx="12" cy="12" r="10" />
+            <line x1="12" y1="8" x2="12" y2="12" />
+            <line x1="12" y1="16" x2="12.01" y2="16" />
+        </svg>
+    );
+}
+
 // ── File type colour map ─────────────────────────────────────────────────────
 
 const FILE_COLORS: Record<string, string> = {
@@ -180,6 +218,22 @@ export default function Knowledge() {
     useEffect(() => {
         fetchDocs();
     }, [fetchDocs]);
+
+    // ── Auto-poll while any document is being processed ──────────────────
+    const hasProcessing = documents.some((d) => d.status === "processing");
+
+    useEffect(() => {
+        if (!hasProcessing) return;
+
+        const interval = setInterval(() => {
+            // Lightweight refresh — silently updates docs without full skeleton
+            getDocuments()
+                .then(({ documents: docs }) => setDocuments(docs))
+                .catch(() => {}); // Silently ignore poll errors
+        }, 3000);
+
+        return () => clearInterval(interval);
+    }, [hasProcessing]);
 
     // ── Upload handler ────────────────────────────────────────────────────
     const handleUpload = useCallback(
@@ -423,6 +477,34 @@ export default function Knowledge() {
                                                 {mimeToLabel(doc.file_type) ||
                                                     doc.file_type}
                                             </span>
+
+                                            {/* Status indicator — right-aligned in card header */}
+                                            <div className="ml-auto flex items-center gap-1">
+                                                {doc.status === "processing" && (
+                                                    <>
+                                                        <Spinner className="h-3.5 w-3.5 text-amber-500" />
+                                                        <span className="text-[11px] font-medium text-amber-600 dark:text-amber-400">
+                                                            Indexing…
+                                                        </span>
+                                                    </>
+                                                )}
+                                                {doc.status === "indexed" && (
+                                                    <>
+                                                        <CheckIcon className="h-3.5 w-3.5 text-emerald-500" />
+                                                        <span className="text-[11px] font-medium text-emerald-600 dark:text-emerald-400">
+                                                            Indexed
+                                                        </span>
+                                                    </>
+                                                )}
+                                                {doc.status === "error" && (
+                                                    <>
+                                                        <AlertIcon className="h-3.5 w-3.5 text-red-500" />
+                                                        <span className="text-[11px] font-medium text-red-600 dark:text-red-400">
+                                                            Failed
+                                                        </span>
+                                                    </>
+                                                )}
+                                            </div>
                                         </div>
 
                                         {/* Filename */}

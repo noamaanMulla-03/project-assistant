@@ -2,9 +2,9 @@
 # Services: PostgreSQL 16, FastAPI backend (hot-reload), Vite frontend (HMR)
 
 services:
-    # ── PostgreSQL ──────────────────────────────────────────────────────────────
+    # ── PostgreSQL (with pgvector extension for vector embeddings) ────────────
     db:
-        image: postgres:16-alpine
+        image: pgvector/pgvector:pg16
         container_name: pa-db
         restart: unless-stopped
         environment:
@@ -46,6 +46,9 @@ services:
             - /app/.venv
             # Persist uploaded knowledge-base files outside the container
             - uploads:/app/uploads
+            # Persist HuggingFace model cache so the embedding model is not
+            # re-downloaded on every container restart (~90 MB).
+            - hf_cache:/root/.cache/huggingface
         depends_on:
             db:
                 condition: service_healthy
@@ -75,6 +78,7 @@ services:
 volumes:
     pgdata:
     uploads:
+    hf_cache:
 
 networks:
     pa-network:

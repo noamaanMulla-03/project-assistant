@@ -11,6 +11,7 @@ export interface KnowledgeDocument {
 	filename: string;
 	file_type: string;
 	file_size: number; // bytes
+	status: string; // "processing" | "indexed" | "error"
 	uploaded_by: string | null;
 	uploaded_by_name: string | null;
 	created_at: string;

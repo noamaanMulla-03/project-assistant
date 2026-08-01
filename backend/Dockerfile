@@ -7,9 +7,11 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 ENV UV_COMPILE_BYTECODE=1
 
 # ── System dependencies ──────────────────────────────────────────────────────
+# libopenblas-dev is required by faiss-cpu at runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libpq-dev \
+    libopenblas-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Application ──────────────────────────────────────────────────────────────

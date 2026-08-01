@@ -9,7 +9,8 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, String, func
+from pgvector.sqlalchemy import Vector
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -61,15 +62,87 @@ class KnowledgeDocument(Base):
         server_default=func.now(),
         nullable=False,
     )
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="processing",
+        server_default="processing",
+        comment="Ingestion status: 'processing' | 'indexed' | 'error'",
+    )
 
     # ── Relationships ─────────────────────────────────────────────────────
     uploader: Mapped["User | None"] = relationship(
         "User",
         lazy="joined",
     )
+    # Cascade-delete chunks when the parent document is removed
+    chunks: Mapped[list["DocumentChunk"]] = relationship(
+        "DocumentChunk",
+        back_populates="document",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
 
     def __repr__(self) -> str:
         return (
             f"<KnowledgeDocument(id={self.id}, filename={self.filename!r}, "
             f"type={self.file_type!r})>"
+        )
+
+
+class DocumentChunk(Base):
+    """A single chunk of text extracted from a knowledge document, with its
+    embedding vector stored via pgvector for semantic similarity search.
+
+    The embedding dimension (384) matches ``all-MiniLM-L6-v2``; if you change
+    the embedding model, update the Vector dimension and run a new migration.
+    """
+
+    __tablename__ = "document_chunks"
+
+    # ── Columns ───────────────────────────────────────────────────────────
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("knowledge_documents.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+        comment="Parent knowledge document — chunks are cascade-deleted",
+    )
+    chunk_index: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        comment="Zero-based position of this chunk within the source document",
+    )
+    content: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        comment="The chunk's text content",
+    )
+    # pgvector column storing the 384-dim embedding from all-MiniLM-L6-v2
+    embedding: Mapped[list[float]] = mapped_column(
+        Vector(384),
+        nullable=False,
+        comment="Dense vector embedding (384-d) for semantic similarity search",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    # ── Relationships ─────────────────────────────────────────────────────
+    document: Mapped["KnowledgeDocument"] = relationship(
+        "KnowledgeDocument",
+        back_populates="chunks",
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<DocumentChunk(id={self.id}, doc_id={self.document_id}, "
+            f"index={self.chunk_index})>"
         )

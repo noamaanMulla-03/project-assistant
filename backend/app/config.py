@@ -46,6 +46,13 @@ class Settings(BaseSettings):
             if ext.strip()
         }
 
+    # ── Vectorization & Embeddings ──────────────────────────────────────
+    EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
+    CHUNK_SIZE: int = 1000
+    CHUNK_OVERLAP: int = 200
+    SEARCH_TOP_K: int = 5
+    INGESTION_TIMEOUT_SECONDS: int = 600  # 10 min — covers first-run model download
+
 
 # Singleton instance — import this everywhere
 settings = Settings()

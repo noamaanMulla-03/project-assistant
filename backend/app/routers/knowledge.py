@@ -1,7 +1,7 @@
 # ── Knowledge Router ──────────────────────────────────────────────────────────
-# Endpoints for uploading, listing, downloading, and deleting knowledge-base
-# documents.  All endpoints require authentication — the knowledge base is
-# universal (shared across all user accounts).
+# Endpoints for uploading, listing, downloading, deleting, and semantically
+# searching knowledge-base documents.  All endpoints require authentication —
+# the knowledge base is universal (shared across all user accounts).
 
 import uuid
 from pathlib import Path
@@ -10,15 +10,20 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.config import settings
 from app.dependencies import get_current_user, get_db
-from app.models.knowledge import KnowledgeDocument
+from app.models.knowledge import DocumentChunk, KnowledgeDocument
 from app.models.user import User
 from app.schemas.auth import MessageResponse
 from app.schemas.knowledge import (
+    DocumentRef,
     KnowledgeDocumentListResponse,
     KnowledgeDocumentResponse,
+    SearchRequest,
+    SearchResponse,
+    SearchResult,
 )
 
 router = APIRouter(prefix="/knowledge", tags=["knowledge"])
@@ -69,11 +74,14 @@ async def upload_document(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Accept a multipart file upload and store it on disk.
+    """Accept a multipart file upload, store it on disk, and trigger async ingestion.
 
     Only ``.pdf``, ``.docx``, and ``.txt`` extensions are allowed.
     The file is saved with a UUID-based name to prevent collisions;
     the original filename is preserved in the database.
+
+    After the response is sent, a background task extracts text, chunks it,
+    embeds the chunks, and indexes them in pgvector + FAISS.
     """
     # Validate filename and extension
     if not file.filename:
@@ -101,17 +109,45 @@ async def upload_document(
     disk_path = upload_dir / stored_name
     disk_path.write_bytes(content)
 
-    # Persist metadata
+    # Persist metadata — status starts as "processing" until background ingestion finishes
     doc = KnowledgeDocument(
         filename=file.filename,
         file_type=ext.lstrip("."),  # store "pdf" not ".pdf"
         file_path=stored_name,  # relative to UPLOAD_DIR
         file_size=len(content),
         uploaded_by=current_user.id,
+        status="processing",
     )
     db.add(doc)
     await db.flush()
     await db.refresh(doc)
+
+    # Commit now so the background task's separate DB session can see this row.
+    # (The get_db dependency will also try to commit, which becomes a no-op.)
+    await db.commit()
+
+    # Trigger async ingestion in the background (creates its own DB session).
+    # Using asyncio.create_task instead of BackgroundTasks because the latter
+    # does not reliably await async coroutines in all FastAPI versions.
+    import asyncio
+    from app.services.vectorization import ingest_document
+
+    async def _safe_ingest() -> None:
+        """Run ingestion in background, logging any failures."""
+        try:
+            await ingest_document(
+                doc_id=doc.id,
+                file_path=disk_path,
+                file_type=doc.file_type,
+            )
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).exception(
+                "Background ingestion failed for document %s", doc.id,
+            )
+
+    asyncio.create_task(_safe_ingest())
 
     # Build response (uploader relationship is eager-loaded via `joined`)
     return _doc_to_response(doc)
@@ -199,8 +235,17 @@ async def delete_document(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Remove a document's metadata and its file from disk."""
+    """Remove a document's metadata, file from disk, and FAISS index entries.
+
+    Chunks in pgvector are cascade-deleted by the FK; FAISS is cleaned up here.
+    """
     doc = await _get_doc_or_404(db, document_id)
+
+    # Remove from FAISS before DB cascade (need chunk IDs from DB first)
+    from app.services.faiss_service import get_faiss_service
+
+    faiss = get_faiss_service()
+    await faiss.remove_document(document_id, db)
 
     # Remove file from disk (best-effort — log but don't fail if missing)
     disk_path = _resolve_upload_path() / doc.file_path
@@ -211,6 +256,80 @@ async def delete_document(
 
     await db.delete(doc)
     return MessageResponse(message=f"Document '{doc.filename}' deleted.")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  POST /knowledge/search
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@router.post(
+    "/search",
+    response_model=SearchResponse,
+    summary="Semantic search over the knowledge base",
+)
+async def search_knowledge(
+    body: SearchRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Search document chunks by natural-language query using FAISS ANN + pgvector.
+
+    The query is embedded with the same model used during ingestion,
+    then the top-k most similar chunks are returned with their scores
+    and parent document metadata.
+    """
+    from app.services.faiss_service import get_faiss_service
+    from app.services.vectorization import _get_embedding_model
+
+    # 1. Embed the query with the same model used during ingestion
+    model = _get_embedding_model()
+    query_embedding = model.embed_query(body.query)
+
+    # 2. FAISS ANN search → get (chunk_id, score) pairs
+    faiss = get_faiss_service()
+    hits = faiss.search(query_embedding, body.top_k)
+
+    if not hits:
+        return SearchResponse(results=[], query=body.query, total=0)
+
+    # 3. Fetch chunk content + parent document metadata from pgvector
+    chunk_ids = [chunk_id for chunk_id, _score in hits]
+
+    result = await db.execute(
+        select(DocumentChunk)
+        .options(selectinload(DocumentChunk.document))
+        .where(DocumentChunk.id.in_(chunk_ids))
+    )
+    chunks = result.scalars().all()
+
+    # Build a dict for O(1) lookup by chunk ID
+    chunks_by_id = {c.id: c for c in chunks}
+
+    # 4. Assemble response preserving FAISS rank order
+    results: list[SearchResult] = []
+    for chunk_id, score in hits:
+        chunk = chunks_by_id.get(chunk_id)
+        if chunk is None:
+            continue
+        results.append(
+            SearchResult(
+                chunk_id=chunk.id,
+                content=chunk.content,
+                score=score,
+                document=DocumentRef(
+                    id=chunk.document.id,
+                    filename=chunk.document.filename,
+                    file_type=chunk.document.file_type,
+                ),
+            )
+        )
+
+    return SearchResponse(
+        results=results,
+        query=body.query,
+        total=len(results),
+    )
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -239,6 +358,7 @@ def _doc_to_response(doc: KnowledgeDocument) -> KnowledgeDocumentResponse:
         filename=doc.filename,
         file_type=doc.file_type,
         file_size=doc.file_size,
+        status=doc.status,
         uploaded_by=doc.uploaded_by,
         uploaded_by_name=doc.uploader.full_name if doc.uploader else None,
         created_at=doc.created_at,
