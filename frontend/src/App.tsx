@@ -3,14 +3,17 @@
 //   /             → redirect to /login
 //   /login        → GuestRoute → Login page
 //   /register     → GuestRoute → Register page
-//   /dashboard    → ProtectedRoute → Dashboard page
+//   /dashboard    → ProtectedRoute → AuthenticatedLayout → Dashboard page
+//   /knowledge    → ProtectedRoute → AuthenticatedLayout → Knowledge page
 
 import { Navigate, Route, Routes } from "react-router-dom";
 import ProtectedRoute from "./components/ProtectedRoute";
 import GuestRoute from "./components/GuestRoute";
+import AuthenticatedLayout from "./components/AuthenticatedLayout";
 import Login from "./pages/Login";
 import Register from "./pages/Register";
 import Dashboard from "./pages/Dashboard";
+import Knowledge from "./pages/Knowledge";
 
 export default function App() {
     return (
@@ -21,9 +24,12 @@ export default function App() {
                 <Route path="/register" element={<Register />} />
             </Route>
 
-            {/* Protected routes — require authentication */}
+            {/* Protected routes — require authentication, wrapped in sidebar layout */}
             <Route element={<ProtectedRoute />}>
-                <Route path="/dashboard" element={<Dashboard />} />
+                <Route element={<AuthenticatedLayout />}>
+                    <Route path="/dashboard" element={<Dashboard />} />
+                    <Route path="/knowledge" element={<Knowledge />} />
+                </Route>
             </Route>
 
             {/* Catch-all: redirect to login */}

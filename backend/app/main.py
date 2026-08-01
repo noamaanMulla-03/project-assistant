@@ -1,6 +1,7 @@
 # ── FastAPI Application Factory ───────────────────────────────────────────────
 # Creates and configures the ASGI app with CORS, routers, and lifespan events.
 
+from pathlib import Path
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -9,15 +10,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.database import engine, Base
 from app.routers.auth import router as auth_router
+from app.routers.knowledge import router as knowledge_router
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown logic.
 
-    On startup we do NOT auto-create tables — migrations handle that.
-    This is kept for future use (e.g. connection pool warming).
+    On startup we ensure the upload directory exists.
     """
+    # Ensure the upload directory exists for knowledge-base files
+    Path(settings.UPLOAD_DIR).resolve().mkdir(parents=True, exist_ok=True)
     yield
     # Shutdown: dispose of the engine's connection pool
     await engine.dispose()
@@ -44,6 +47,7 @@ app.add_middleware(
 
 # ── Routers ───────────────────────────────────────────────────────────────────
 app.include_router(auth_router)
+app.include_router(knowledge_router)
 
 
 # ── Health Check ──────────────────────────────────────────────────────────────

@@ -9,6 +9,10 @@ export default {
 	darkMode: "class", // Toggle via <html class="dark">
 	theme: {
 		extend: {
+			// ── Typography — Inter (Anthropic / Claude brand typeface) ──────
+			fontFamily: {
+				sans: ['"Inter"', "system-ui", "-apple-system", "sans-serif"],
+			},
 			// ── Animation keyframes for Aceternity UI effects ──────────────────
 			animation: {
 				"glowing-effect":

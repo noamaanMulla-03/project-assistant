@@ -32,6 +32,20 @@ class Settings(BaseSettings):
         """Return CORS origins as a list (split from comma-separated env var)."""
         return [origin.strip() for origin in self.CORS_ORIGINS.split(",")]
 
+    # ── File Uploads ──────────────────────────────────────────────────────
+    UPLOAD_DIR: str = "./uploads"
+    MAX_UPLOAD_SIZE_MB: int = 25
+    ALLOWED_UPLOAD_EXTENSIONS: str = ".pdf,.docx,.txt"
+
+    @property
+    def allowed_upload_extensions_set(self) -> set[str]:
+        """Return allowed extensions as a set of lowercase strings."""
+        return {
+            ext.strip().lower()
+            for ext in self.ALLOWED_UPLOAD_EXTENSIONS.split(",")
+            if ext.strip()
+        }
+
 
 # Singleton instance — import this everywhere
 settings = Settings()

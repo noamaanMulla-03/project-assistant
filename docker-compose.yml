@@ -44,6 +44,8 @@ services:
             - ./backend:/app
             # Prevent the virtual env from being shadowed by the bind mount
             - /app/.venv
+            # Persist uploaded knowledge-base files outside the container
+            - uploads:/app/uploads
         depends_on:
             db:
                 condition: service_healthy
@@ -72,6 +74,7 @@ services:
 
 volumes:
     pgdata:
+    uploads:
 
 networks:
     pa-network:
