@@ -43,7 +43,6 @@ function UploadIcon({ className }: { className?: string }) {
 }
 
 function FileIcon({
-    fileType,
     className,
 }: {
     fileType: string;

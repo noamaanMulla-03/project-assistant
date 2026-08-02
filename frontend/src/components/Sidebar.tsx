@@ -8,7 +8,7 @@
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
-import { motion, useMotionValue, useSpring, useTransform } from "motion/react";
+import { motion, useMotionValue, useSpring } from "motion/react";
 import { useAuth } from "../context/AuthContext";
 import { useTheme } from "../context/ThemeContext";
 import { listProjects, type ProjectResponse } from "../api/project";
@@ -18,7 +18,6 @@ import { cn } from "../components/utils";
 
 const COLLAPSED_W = 64;
 const EXPANDED_W = 256;
-const STORAGE_KEY = "project-assistant-sidebar-collapsed";
 
 // ── Inline SVG Icons ─────────────────────────────────────────────────────────
 // Each icon is a tiny function returning an SVG.  Provides tree-shakeable,
@@ -273,7 +272,6 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
     // ── Hover lift effect on the entire sidebar ───────────────────────────
     const containerRef = useRef<HTMLDivElement>(null);
     const mouseY = useMotionValue(0.5);
-    const shadowOpacity = useTransform(mouseY, [0, 1], [0.08, 0.14]);
 
     // ── Logout handler ────────────────────────────────────────────────────
     const handleLogout = async () => {

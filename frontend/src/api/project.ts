@@ -195,9 +195,9 @@ export async function removeProjectDocument(
 // ── Review Summary Types ─────────────────────────────────────────────────────
 
 export interface ReviewSummary {
-	facts: Record<string, unknown>[];
-	conflicts: Record<string, unknown>[];
-	action_items: Record<string, unknown>[];
+	facts: unknown[];
+	conflicts: unknown[];
+	action_items: unknown[];
 }
 
 /** Save the user-reviewed action summary for a project. */
