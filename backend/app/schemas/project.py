@@ -37,6 +37,8 @@ class ProjectResponse(BaseModel):
     created_by_name: str | None  # full_name of creator, null if user deleted
     # Cached AI extraction result — None until the first analysis completes
     analysis_result: dict[str, Any] | None = None
+    # User-reviewed action summary — None until the user saves their review
+    review_summary: dict[str, Any] | None = None
 
     model_config = {"from_attributes": True}
 
@@ -46,4 +48,21 @@ class ProjectListResponse(BaseModel):
 
     projects: list[ProjectResponse]
     total: int
+
+
+# ── Review Summary Request ────────────────────────────────────────────────────
+
+
+class ReviewSummaryRequest(BaseModel):
+    """Payload from the frontend's "Finalize & Save" button.
+
+    Each array mirrors the review workspace's mutable state — facts with
+    user-assigned classifications, conflicts with resolution notes, and
+    action items with approve/reject decisions.
+    """
+
+    facts: list[dict[str, Any]]
+    conflicts: list[dict[str, Any]]
+    action_items: list[dict[str, Any]]
+
 

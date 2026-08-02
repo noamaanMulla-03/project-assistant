@@ -60,6 +60,14 @@ class Project(Base):
         default=None,
         comment="Cached ExtractionResult JSON from POST /projects/{id}/analyze",
     )
+    # Human-reviewed action summary — NULL until the user clicks "Finalize & Save".
+    # Contains the user's corrections, reclassifications, and conflict resolutions.
+    review_summary: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB,
+        nullable=True,
+        default=None,
+        comment="User-reviewed action summary JSON from PUT /projects/{id}/review",
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

@@ -11,6 +11,7 @@
 #   • ExtractionResult uses extra="forbid" to catch hallucinations.
 
 from pydantic import BaseModel, Field
+from typing import Literal
 
 # ── Shared Base ───────────────────────────────────────────────────────────────
 
@@ -42,7 +43,7 @@ class ExtractionItem(BaseModel):
 class Fact(ExtractionItem):
     """A confirmed, verifiable statement from the source documents."""
 
-    confidence: str = Field(
+    confidence: Literal["high", "medium", "low"] = Field(
         ...,
         description="Confidence level: 'high' | 'medium' | 'low'",
         examples=["high"],
@@ -70,7 +71,7 @@ class Assumption(ExtractionItem):
 class Risk(ExtractionItem):
     """A potential negative outcome or threat identified in the source."""
 
-    severity: str = Field(
+    severity: Literal["critical", "high", "medium", "low"] = Field(
         ...,
         description="Severity: 'critical' | 'high' | 'medium' | 'low'",
     )
@@ -97,9 +98,9 @@ class ActionItem(ExtractionItem):
     frontend renders these as read-only highlights, not as a task manager.
     """
 
-    priority: str = Field(
+    priority: Literal["high", "medium", "low"] = Field(
         ...,
-        description="Priority: 'high' | 'medium' | 'low'",
+        description="Priority/Importance: 'high' | 'medium' | 'low'",
     )
     deadline: str = Field(
         default="",
@@ -189,7 +190,7 @@ class MissingAction(BaseModel):
         ...,
         description="Section/chunk identifier in the policy document",
     )
-    urgency: str = Field(
+    urgency: Literal["critical", "high", "medium", "low"] = Field(
         ...,
         description="Urgency: 'critical' | 'high' | 'medium' | 'low'",
     )
@@ -211,7 +212,7 @@ class MissingQuestion(BaseModel):
         ...,
         description="Section/chunk identifier in the policy document",
     )
-    urgency: str = Field(
+    urgency: Literal["critical", "high", "medium", "low"] = Field(
         ...,
         description="Urgency: 'critical' | 'high' | 'medium' | 'low'",
     )

@@ -30,6 +30,7 @@ from app.schemas.project import (
     ProjectDocumentRef,
     ProjectListResponse,
     ProjectResponse,
+    ReviewSummaryRequest,
 )
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -109,6 +110,7 @@ def _project_to_response(
         created_at=project.created_at,
         created_by_name=project.creator.full_name if project.creator else None,
         analysis_result=project.analysis_result,
+        review_summary=project.review_summary,
     )
 
 
@@ -490,3 +492,56 @@ async def analyze_project(
     await db.flush()
 
     return extraction_result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  PUT /projects/{project_id}/review
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@router.put(
+    "/{project_id}/review",
+    response_model=ProjectResponse,
+    summary="Save the user-reviewed project action summary",
+)
+async def save_review(
+    project_id: uuid.UUID,
+    body: ReviewSummaryRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Persist the user's reviewed action summary (facts with classifications,
+    conflicts with resolution notes, and action items with approve/reject
+    decisions).  Overwrites any previously saved review.
+
+    Returns 404 if the project doesn't exist, 403 if the caller isn't the
+    creator, and 409 if no analysis has been run yet.
+    """
+    # 1. Fetch project and verify ownership
+    result = await db.execute(select(Project).where(Project.id == project_id))
+    project = result.scalar_one_or_none()
+    if project is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Project not found.",
+        )
+    if project.created_by != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only save reviews for your own projects.",
+        )
+
+    # 2. Ensure an analysis exists before allowing a review save
+    if project.analysis_result is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cannot save review — run analysis first.",
+        )
+
+    # 3. Persist the review summary
+    project.review_summary = body.model_dump()
+    await db.flush()
+
+    # 4. Return updated project
+    doc_refs = await _resolve_documents(db, project.document_ids)
+    return _project_to_response(project, doc_refs)

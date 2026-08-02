@@ -22,6 +22,8 @@ export interface ProjectResponse {
 	created_by_name: string | null;
 	// Cached AI extraction result — null until the first analysis completes
 	analysis_result: ExtractionResult | null;
+	// User-reviewed action summary — null until the user saves their review
+	review_summary: ReviewSummary | null;
 }
 
 export interface ProjectListResponse {
@@ -141,7 +143,9 @@ export async function createProject(files: File[]): Promise<ProjectResponse> {
 
 /** Fetch a project by ID, including live per-document ingestion statuses. */
 export async function getProject(id: string): Promise<ProjectResponse> {
-	const { data } = await apiClient.get<ProjectResponse>(`/projects/${id}`);
+	const { data } = await apiClient.get<ProjectResponse>(`/projects/${id}`, {
+		headers: { "Cache-Control": "no-cache" }
+	});
 	return data;
 }
 
@@ -176,5 +180,25 @@ export async function removeProjectDocument(
 	const { data } = await apiClient.delete<
 		ProjectResponse | { deleted: true }
 	>(`/projects/${projectId}/documents/${documentId}`);
+	return data;
+}
+
+// ── Review Summary Types ─────────────────────────────────────────────────────
+
+export interface ReviewSummary {
+	facts: Record<string, unknown>[];
+	conflicts: Record<string, unknown>[];
+	action_items: Record<string, unknown>[];
+}
+
+/** Save the user-reviewed action summary for a project. */
+export async function saveReview(
+	projectId: string,
+	review: ReviewSummary,
+): Promise<ProjectResponse> {
+	const { data } = await apiClient.put<ProjectResponse>(
+		`/projects/${projectId}/review`,
+		review,
+	);
 	return data;
 }

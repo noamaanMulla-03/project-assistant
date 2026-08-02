@@ -19,12 +19,14 @@ import { useParams } from "react-router-dom";
 import ProjectNavbar from "../components/ProjectNavbar";
 import {
     getProject,
+    saveReview,
     type ExtractionResult,
     type Fact,
     type DocumentConflict,
     type ActionItem,
     type ProjectDocumentRef,
     type ProjectResponse,
+    type ReviewSummary,
 } from "../api/project";
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -712,19 +714,27 @@ export default function ProjectReview() {
         <div className="flex h-full flex-col">
             <ProjectNavbar projectId={id!} hasAnalysis={true} />
             <div className="flex-1 overflow-hidden">
-                <ProjectReviewWorkspace result={project.analysis_result} documents={project.documents} />
+                <ProjectReviewWorkspace projectId={id!} result={project.analysis_result} reviewSummary={project.review_summary} documents={project.documents} />
             </div>
         </div>
     );
 }
 
 interface ProjectReviewProps {
+    projectId: string;
     result: ExtractionResult;
+    reviewSummary?: ReviewSummary | null;
     documents: ProjectDocumentRef[];
 }
 
-function ProjectReviewWorkspace({ result, documents }: ProjectReviewProps) {
-    const [reviewState, setReviewState] = useState<ReviewState>(() => initReviewState(result));
+function ProjectReviewWorkspace({ projectId, result, reviewSummary, documents }: ProjectReviewProps) {
+    const [reviewState, setReviewState] = useState<ReviewState>(() => {
+        if (reviewSummary) {
+            // The saved summary perfectly matches ReviewState structure
+            return reviewSummary as unknown as ReviewState;
+        }
+        return initReviewState(result);
+    });
     const [selectedSource, setSelectedSource] = useState<SelectedSource | null>(null);
     const [activeTab, setActiveTab] = useState<TabId>("facts");
     const [expandedCards, setExpandedCards] = useState<Set<number>>(new Set());
@@ -775,9 +785,27 @@ function ProjectReviewWorkspace({ result, documents }: ProjectReviewProps) {
         });
     }, []);
 
-    const handleFinalize = useCallback(() => {
-        console.log("Finalize & Save Action Summary:", JSON.stringify(reviewState, null, 2));
-    }, [reviewState]);
+    // ── Save state ───────────────────────────────────────────────────────
+    const [saving, setSaving] = useState(false);
+    const [saveStatus, setSaveStatus] = useState<"idle" | "success" | "error">("idle");
+
+    const handleFinalize = useCallback(async () => {
+        if (!projectId) return;
+        setSaving(true);
+        setSaveStatus("idle");
+        try {
+            await saveReview(projectId, {
+                facts: reviewState.facts,
+                conflicts: reviewState.conflicts,
+                action_items: reviewState.action_items,
+            });
+            setSaveStatus("success");
+        } catch {
+            setSaveStatus("error");
+        } finally {
+            setSaving(false);
+        }
+    }, [projectId, reviewState]);
 
     // ── Computed ─────────────────────────────────────────────────────────
 
@@ -902,13 +930,22 @@ function ProjectReviewWorkspace({ result, documents }: ProjectReviewProps) {
                         {pendingCount > 0 && <span>🟡 {pendingCount} actions pending</span>}
                         {unresolvedCount > 0 && <span>🔴 {unresolvedCount} conflicts unresolved</span>}
                         {pendingCount === 0 && unresolvedCount === 0 && <span className="text-emerald-600 dark:text-emerald-400">✓ All items reviewed</span>}
+                        {/* Save status feedback */}
+                        {saveStatus === "success" && <span className="text-emerald-600 dark:text-emerald-400">✓ Saved</span>}
+                        {saveStatus === "error" && <span className="text-red-500">✗ Save failed</span>}
                     </div>
                     <button
                         type="button"
                         onClick={handleFinalize}
-                        className="rounded-lg bg-primary-600 px-5 py-2 text-xs font-medium text-white transition-colors hover:bg-primary-700 dark:bg-primary-500 dark:hover:bg-primary-400 dark:text-surface-dark-950"
+                        disabled={saving}
+                        className={cn(
+                            "rounded-lg px-5 py-2 text-xs font-medium transition-colors",
+                            saving
+                                ? "cursor-not-allowed bg-surface-300 text-surface-500 dark:bg-surface-dark-700 dark:text-surface-dark-400"
+                                : "bg-primary-600 text-white hover:bg-primary-700 dark:bg-primary-500 dark:hover:bg-primary-400 dark:text-surface-dark-950",
+                        )}
                     >
-                        Finalize &amp; Save
+                        {saving ? "Saving…" : "Finalize & Save"}
                     </button>
                 </div>
             </div>
