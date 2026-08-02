@@ -705,6 +705,7 @@ def _build_llm():
     )
 
 
+
 def _invoke_structured(
     system_prompt: str,
     context: str,
@@ -718,16 +719,9 @@ def _invoke_structured(
     The return value is a fully validated Pydantic instance, no post-hoc
     parsing or synonym mapping needed.
     """
-    from langchain_ollama import ChatOllama
-
-    llm = ChatOllama(
-        model=settings.OLLAMA_MODEL,
-        temperature=0,
-        base_url=settings.OLLAMA_BASE_URL,
-        num_ctx=settings.OLLAMA_NUM_CTX,
-        num_predict=settings.OLLAMA_NUM_PREDICT,
-    )
+    llm = _build_llm()
     structured_llm = llm.with_structured_output(schema, method="json_schema")
+
 
     schema_name = schema.__name__
     logger.debug("Invoking %s (context=%d chars)", schema_name, len(context))

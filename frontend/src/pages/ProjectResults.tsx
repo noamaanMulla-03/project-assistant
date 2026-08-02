@@ -204,6 +204,25 @@ function RedoIcon() {
 //  Project Results Page
 // ═══════════════════════════════════════════════════════════════════════════════
 
+function normalizeExtraction(res: ExtractionResult | null): ExtractionResult | null {
+    if (!res) return null;
+    return {
+        ...res,
+        document_types: res.document_types ?? [],
+        summary: res.summary ?? "",
+        facts: res.facts ?? [],
+        decisions: res.decisions ?? [],
+        assumptions: res.assumptions ?? [],
+        risks: res.risks ?? [],
+        open_questions: res.open_questions ?? [],
+        action_items: res.action_items ?? [],
+        document_conflicts: res.document_conflicts ?? [],
+        repeated_statements: res.repeated_statements ?? [],
+        missing_actions: res.missing_actions ?? [],
+        missing_questions: res.missing_questions ?? [],
+    };
+}
+
 export default function ProjectResults() {
     const { id } = useParams<{ id: string }>();
     const [result, setResult] = useState<ExtractionResult | null>(null);
@@ -223,12 +242,12 @@ export default function ProjectResults() {
                 setProject(proj);
                 // If cached analysis exists, use it directly
                 if (proj.analysis_result) {
-                    setResult(proj.analysis_result);
+                    setResult(normalizeExtraction(proj.analysis_result));
                     setLoading(false);
                 } else {
                     // No cached result — run analysis for the first time
                     return analyzeProject(id).then((extraction) => {
-                        setResult(extraction);
+                        setResult(normalizeExtraction(extraction));
                         // Refresh project to get the now-cached result
                         return getProject(id).then(setProject);
                     });
@@ -250,7 +269,7 @@ export default function ProjectResults() {
         setError(null);
         try {
             const extraction = await analyzeProject(id, true);
-            setResult(extraction);
+            setResult(normalizeExtraction(extraction));
             // Refresh project to get the updated cached result
             const updated = await getProject(id);
             setProject(updated);
@@ -363,7 +382,7 @@ export default function ProjectResults() {
                     </div>
 
                     {/* Document Types — per-document classification */}
-                    {result.document_types.length > 0 && (
+                    {(result.document_types?.length ?? 0) > 0 && (
                         <div className="mb-8 rounded-xl border border-surface-200 bg-white p-5 dark:border-surface-dark-700 dark:bg-surface-dark-900">
                             <h2 className="mb-3 text-sm font-semibold text-surface-700 dark:text-surface-dark-200">
                                 Document Types
@@ -376,7 +395,8 @@ export default function ProjectResults() {
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    {result.document_types.map((dt, i) => (
+                                    {(result.document_types ?? []).map((dt, i) => (
+
                                         <tr key={i} className="border-b border-surface-50 last:border-0 dark:border-surface-dark-850">
                                             <td className="py-2 pr-4 text-surface-800 dark:text-surface-dark-100">{dt.filename}</td>
                                             <td className="py-2">

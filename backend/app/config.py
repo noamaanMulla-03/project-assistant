@@ -1,6 +1,7 @@
 # ── Application Configuration ─────────────────────────────────────────────────
 # Loads settings from environment variables / .env file via pydantic-settings.
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -17,6 +18,17 @@ class Settings(BaseSettings):
     DATABASE_URL: str = (
         "postgresql+asyncpg://postgres:postgres@localhost:5432/project_assistant"
     )
+
+    @field_validator("DATABASE_URL", mode="before")
+    @classmethod
+    def assemble_db_url(cls, v: str) -> str:
+        if isinstance(v, str):
+            if v.startswith("postgresql://"):
+                return v.replace("postgresql://", "postgresql+asyncpg://", 1)
+            elif v.startswith("postgres://"):
+                return v.replace("postgres://", "postgresql+asyncpg://", 1)
+        return v
+
 
     # ── JWT ───────────────────────────────────────────────────────────────
     JWT_SECRET_KEY: str = "dev-secret-key-change-in-production"
@@ -55,12 +67,14 @@ class Settings(BaseSettings):
 
     # ── LLM / Extraction ───────────────────────────────────────────────
     OLLAMA_BASE_URL: str = "http://localhost:11434"
+    OLLAMA_API_KEY: str = ""
     OLLAMA_MODEL: str = "gpt-oss:120b-cloud"  # Ollama Cloud — remote inference, zero local load
     OLLAMA_NUM_CTX: int = 65536  # cloud GPUs handle large context windows
     OLLAMA_NUM_PREDICT: int = 16384
     EXTRACTION_CHUNKS_PER_DOC: int = 12  # max chunks per tool call
     EXTRACTION_POLICY_TOP_K: int = 8  # max policy chunks per search
     AGENT_MAX_ITERATIONS: int = 10  # max tool-calling rounds before forced stop
+
 
 
 # Singleton instance — import this everywhere

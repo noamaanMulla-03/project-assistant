@@ -7,7 +7,7 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
-from sqlalchemy.ext.asyncio import async_engine_from_config
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.config import settings
 from app.database import Base
@@ -20,7 +20,8 @@ from app.models.project import Project  # noqa: F401
 # Alembic Config object
 config = context.config
 
-# Override sqlalchemy.url from our settings (handles env-vars cleanly)
+# Use settings.DATABASE_URL directly — the field_validator in config.py ensures
+# it is always postgresql+asyncpg://, regardless of what was set in Railway.
 config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
 
 # Set up Python logging
@@ -53,9 +54,10 @@ def do_run_migrations(connection: Connection) -> None:
 
 async def run_async_migrations() -> None:
     """Create an async engine and run migrations."""
-    connectable = async_engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
+    # Build the engine directly from settings so the postgresql+asyncpg://
+    # scheme is always used — bypassing any ini-config URL ambiguity.
+    connectable = create_async_engine(
+        settings.DATABASE_URL,
         poolclass=pool.NullPool,
         connect_args={"statement_cache_size": 0},
     )
