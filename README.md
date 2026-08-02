@@ -8,36 +8,47 @@ An AI-powered application that analyses project documents (meeting notes, requir
 
 1. [Architecture Overview](#architecture-overview)
 2. [Project Structure](#project-structure)
-3. [Prerequisites](#prerequisites)
-4. [Quick Start](#quick-start)
+3. [Completed & Excluded Scope](#completed--excluded-scope)
+4. [Prerequisites & Setup](#prerequisites--setup)
 5. [Environment Variables](#environment-variables)
-6. [API Endpoints](#api-endpoints)
-7. [Frontend Routes](#frontend-routes)
-8. [AI Workflow](#ai-workflow)
-9. [Database Migrations](#database-migrations)
-10. [Testing](#testing)
-11. [Sample Documents](#sample-documents)
-12. [Tech Stack](#tech-stack)
+6. [Known Limitations](#known-limitations)
+7. [Deployment Details](#deployment-details)
+8. [API Endpoints](#api-endpoints)
+9. [Frontend Routes](#frontend-routes)
+10. [AI Workflow](#ai-workflow)
+11. [Database Migrations](#database-migrations)
+12. [Testing](#testing)
+13. [Sample Documents](#sample-documents)
+14. [Tech Stack](#tech-stack)
 
 ---
 
 ## Architecture Overview
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│                     Docker Compose                           │
-│                                                              │
-│  ┌──────────────┐   ┌──────────────────┐   ┌─────────────┐ │
-│  │   Frontend    │   │     Backend       │   │  PostgreSQL  │ │
-│  │  Vite + React │──▶│  FastAPI (8000)   │──▶│  pgvector:16 │ │
-│  │   port 5173   │   │  uvicorn --reload │   │  port 5432   │ │
-│  └──────────────┘   └────────┬───────────┘   └─────────────┘ │
-│                              │                               │
-│                     ┌────────┴───────────┐                   │
-│                     │  Ollama (external)  │                   │
-│                     │  localhost:11434    │                   │
-│                     └────────────────────┘                   │
-└──────────────────────────────────────────────────────────────┘
+```mermaid
+graph TD
+    subgraph Client
+        F[Frontend Vite + React Port 5173]
+    end
+
+    subgraph Backend Services
+        B[FastAPI Backend Port 8000]
+        FAISS[(In-Memory FAISS)]
+    end
+
+    subgraph Data Layer
+        DB[(PostgreSQL 16 + pgvector Port 5432)]
+    end
+
+    subgraph External LLM
+        O[Ollama localhost:11434]
+    end
+
+    F <-->|REST API / JWT| B
+    B -->|SQL / pgvector| DB
+    B <-->|Inference| O
+    B <-->|ANN Search| FAISS
+    DB -->|Build Index| FAISS
 ```
 
 The backend proxies LLM calls to **Ollama** running on the host machine. Embedding is handled locally via `sentence-transformers/all-MiniLM-L6-v2` (384-dim vectors). Document chunks are stored in PostgreSQL with the **pgvector** extension and indexed in an in-memory **FAISS** index for fast ANN search.
@@ -147,7 +158,27 @@ project_assistant/
 
 ---
 
-## Prerequisites
+## Completed & Excluded Scope
+
+### Completed Scope
+- **Document Ingestion**: Parsing of PDF, DOCX, and TXT files, chunking, and generation of embeddings using HuggingFace.
+- **Local AI Pipeline**: Full integration with local Ollama for privacy-preserving, structured JSON extraction.
+- **Advanced Agent Workflow**: A LangGraph agent that autonomously retrieves project documents and cross-references organizational policies via FAISS ANN search.
+- **Structured Outputs**: 4-phase Pydantic-enforced LLM extraction to guarantee consistent data shapes without regex hacks.
+- **Review Workspace**: A robust React split-pane interface for human-in-the-loop validation, conflict resolution, and document viewing.
+
+### Intentionally Excluded Scope
+- **Multi-user Collaboration**: No real-time simultaneous editing (e.g., WebSockets/CRDTs) of project results among multiple users.
+- **Advanced RBAC**: Only simple user authentication exists. No organization/team groupings or granular document permissions.
+- **Third-Party Integrations**: No direct export to Jira, Confluence, Trello, or Slack.
+- **Cloud LLM Fallback**: Hardcoded to local Ollama; no built-in OpenAI/Anthropic fallback.
+- **Email Notifications**: Asynchronous tasks do not currently notify users via email when finished.
+
+---
+
+## Prerequisites & Setup
+
+### Prerequisites
 
 | Tool                                | Version | Purpose                           |
 | ----------------------------------- | ------- | --------------------------------- |
@@ -163,44 +194,23 @@ ollama pull gpt-oss:120b-cloud
 
 > Any Ollama model can be used — change `OLLAMA_MODEL` in `.env`. The code uses `with_structured_output()` (JSON schema mode), so the model must support structured JSON output.
 
----
+### Quick Start (Docker - Recommended)
 
-## Quick Start
+1. **Clone and configure**
+   ```bash
+   cp .env.example .env
+   ```
+2. **Build and start**
+   ```bash
+   docker compose up -d --build
+   ```
+3. **Verify**
+   - Backend health check: `curl http://localhost:8000/health`
+   - Frontend: `http://localhost:5173`
 
-### 1. Clone and configure
+On first startup, Alembic migrations run automatically, the HuggingFace embedding model downloads (~90 MB), and the FAISS index builds from existing vectors.
 
-```bash
-cp .env.example .env   # Or create .env manually (see below)
-```
-
-### 2. Build and start
-
-```bash
-docker compose up -d --build
-```
-
-This starts three services:
-
-| Service    | Container     | Port | Description              |
-| ---------- | ------------- | ---- | ------------------------ |
-| `db`       | `pa-db`       | 5432 | PostgreSQL 16 + pgvector |
-| `backend`  | `pa-backend`  | 8000 | FastAPI with hot-reload  |
-| `frontend` | `pa-frontend` | 5173 | Vite dev server with HMR |
-
-### 3. Verify
-
-```bash
-# Backend health check
-curl http://localhost:8000/health
-# → {"status":"ok"}
-
-# Frontend
-open http://localhost:5173
-```
-
-On first startup, Alembic migrations run automatically (`alembic upgrade head`), the HuggingFace embedding model downloads (~90 MB), and the FAISS index builds from existing vectors.
-
-### 4. Typical usage flow
+### Typical Usage Flow
 
 1. **Register** an account at `http://localhost:5173/register`
 2. **Upload knowledge-base policies** at `/knowledge` (drag-and-drop `.txt`, `.pdf`, or `.docx` files)
@@ -209,6 +219,28 @@ On first startup, Alembic migrations run automatically (`alembic upgrade head`),
 5. **Start Analysis** — triggers the AI pipeline (may take 20–60 seconds)
 6. **Review results** at `/project/:id/results` — see extracted facts, decisions, risks, conflicts, and policy gaps
 7. **Review & finalize** at `/project/:id/review` — reclassify facts, resolve conflicts, approve/reject action items, save summary
+
+### Local Development (Without Docker)
+
+If you prefer running the services directly on your host machine:
+
+1. Ensure PostgreSQL 16 is running with the `pgvector` extension installed.
+2. Update `.env` to point `DATABASE_URL` to your local Postgres instance.
+3. **Backend**:
+   ```bash
+   cd backend
+   python -m venv .venv
+   source .venv/bin/activate
+   pip install -r requirements.txt
+   alembic upgrade head
+   uvicorn app.main:app --reload
+   ```
+4. **Frontend**:
+   ```bash
+   cd frontend
+   npm install
+   npm run dev
+   ```
 
 ---
 
@@ -247,6 +279,57 @@ VITE_API_BASE_URL=http://localhost:8000
 ```
 
 > **macOS note**: Use `http://host.docker.internal:11434` for `OLLAMA_BASE_URL` so the Docker container can reach Ollama on the host.
+
+---
+
+## Known Limitations
+
+- **In-Memory FAISS Scaling**: The FAISS index is held in-memory via a singleton wrapper (`faiss_service.py`). This prevents the backend from scaling horizontally (multiple worker nodes) out of the box. A transition to a distributed vector store (or relying solely on pgvector's HNSW index) is required for high availability across multiple backend instances.
+- **LLM Context Limits**: The local LLM context window limits how much cross-document context can be injected into the Phase 2 (Conflict) and Phase 3 (Gap Analysis) prompts. Exceedingly large projects might suffer from context truncation.
+- **Text-Only PDF Parsing**: The current extraction relies purely on text extraction. Images, charts, and complex table layouts in PDFs are not parsed via OCR.
+
+---
+
+## Deployment Details
+
+There are two recommended architectures for deploying Project Assistant to production:
+
+### Option A: AWS Stack (Enterprise)
+
+#### 1. Database Layer
+- Use **Amazon RDS for PostgreSQL**.
+- Ensure you enable the `pgvector` extension on your RDS instance.
+- Ensure the database is placed in a private subnet for security.
+
+#### 2. Backend (FastAPI)
+- Containerize the FastAPI backend and push the image to **Amazon ECR**.
+- Deploy using **Amazon ECS with Fargate**.
+- **Crucial limitation regarding FAISS**: Because the current FAISS implementation is in-memory per-process, you must either limit to a single Fargate task (vertical scaling) or transition the FAISS logic fully to RDS pgvector if running multiple instances.
+- For the LLM, either run Ollama on an EC2 instance equipped with GPUs (e.g., `g5` instances) and point `OLLAMA_BASE_URL` to it, or transition the code to use a managed LLM API (like AWS Bedrock).
+
+#### 3. Frontend (React/Vite)
+- The frontend is a static SPA. Build it using `npm run build`.
+- Host the `dist` folder on **Amazon S3** and serve it via **Amazon CloudFront** for global CDN caching.
+
+---
+
+### Option B: Modern Serverless Stack (Vercel, Railway, Supabase)
+
+#### 1. Database Layer (Supabase)
+- Create a new project in **Supabase**.
+- Supabase natively supports the `pgvector` extension. Enable it via the SQL Editor (`CREATE EXTENSION IF NOT EXISTS vector;`).
+- Retrieve your session-pooled connection string (port 6543) and set it as your `DATABASE_URL`.
+
+#### 2. Backend (Railway)
+- Deploy the FastAPI backend on **Railway** via their GitHub integration.
+- Railway will automatically detect the Python environment and `Dockerfile`.
+- Map your environment variables (like the Supabase `DATABASE_URL`, JWT secrets, etc.) in the Railway dashboard.
+- *Note on LLM*: Railway does not provide GPU instances natively. You will need to host Ollama on a GPU cloud provider (like RunPod or Lambda Labs) or modify the backend to use a hosted LLM API (e.g., OpenAI or Anthropic).
+
+#### 3. Frontend (Vercel)
+- Connect your GitHub repository to **Vercel**.
+- Vercel will automatically detect the Vite React project and use the provided `vercel.json` for routing rules.
+- Add your `VITE_API_BASE_URL` pointing to your Railway backend URL in the Vercel environment variables settings.
 
 ---
 
@@ -318,7 +401,7 @@ A LangGraph agent with 2 async tools autonomously explores:
 1. **`retrieve_document_chunks(filename)`** — Fetches pre-vectorized chunks from pgvector for each uploaded document. Returns `[DOCUMENT:...] [SECTION:...]`-labeled text.
 2. **`search_policy_kb(query)`** — Searches the organizational knowledge base via FAISS ANN. Returns `[POLICY:...] [SECTION:...]`-labeled chunks.
 
-The agent autonomously retrieves all documents, then searches for relevant policies. Its output is not consumed directly — it feeds into Stage B.
+The agent autonomously retrieves all documents, then searches for relevant policies. The agent then terminates and outputs a terse list of discovered topics. Its narrative output is not consumed directly — the extracted policy lines feed into Stage B.
 
 ### Stage B — 4-Phase Structured Pipeline
 
