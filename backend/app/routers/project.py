@@ -489,6 +489,10 @@ async def analyze_project(
 
     # 5. Cache the result in the DB so subsequent loads skip the LLM
     project.analysis_result = extraction_result.model_dump()
+    # Clear the saved review so the review page re-initialises from the new analysis.
+    # The frontend will show a toast notifying the user their review has been reset.
+    if force:
+        project.review_summary = None
     await db.flush()
 
     return extraction_result

@@ -223,6 +223,28 @@ function normalizeExtraction(res: ExtractionResult | null): ExtractionResult | n
     };
 }
 
+// ── Toast Notification ──────────────────────────────────────────────────────
+
+function Toast({ message, onDismiss }: { message: string; onDismiss: () => void }) {
+    useEffect(() => {
+        const t = setTimeout(onDismiss, 4000);
+        return () => clearTimeout(t);
+    }, [onDismiss]);
+    return (
+        <div className="fixed bottom-6 left-1/2 z-50 -translate-x-1/2 flex items-center gap-3 rounded-xl border border-amber-200 bg-amber-50 px-5 py-3 shadow-lg dark:border-amber-800 dark:bg-amber-950/70">
+            <svg className="h-4 w-4 shrink-0 text-amber-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10" />
+                <line x1="12" y1="8" x2="12" y2="12" />
+                <line x1="12" y1="16" x2="12.01" y2="16" />
+            </svg>
+            <span className="text-sm font-medium text-amber-800 dark:text-amber-200">{message}</span>
+            <button onClick={onDismiss} className="ml-1 text-amber-500 hover:text-amber-700 dark:text-amber-400 dark:hover:text-amber-200" aria-label="Dismiss">
+                <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+            </button>
+        </div>
+    );
+}
+
 export default function ProjectResults() {
     const { id } = useParams<{ id: string }>();
     const [result, setResult] = useState<ExtractionResult | null>(null);
@@ -230,6 +252,7 @@ export default function ProjectResults() {
     const [loading, setLoading] = useState(true);
     const [redoing, setRedoing] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [toast, setToast] = useState<string | null>(null);
 
     // ── Load project and use cached analysis or run fresh ──────────────
     useEffect(() => {
@@ -270,9 +293,11 @@ export default function ProjectResults() {
         try {
             const extraction = await analyzeProject(id, true);
             setResult(normalizeExtraction(extraction));
-            // Refresh project to get the updated cached result
+            // Refresh project — review_summary is now null on the server
             const updated = await getProject(id);
             setProject(updated);
+            // Notify the user that the previous review was cleared
+            setToast("Analysis updated — your previous review has been reset to match the new results.");
         } catch (err: unknown) {
             const detail =
                 (err as { response?: { data?: { detail?: string } } })?.response?.data
@@ -331,6 +356,9 @@ export default function ProjectResults() {
         <div className="flex h-full flex-col">
             {/* Stage navbar */}
             {id && <ProjectNavbar projectId={id} hasAnalysis={hasAnalysis} />}
+
+            {/* Toast notification */}
+            {toast && <Toast message={toast} onDismiss={() => setToast(null)} />}
 
             <div className="flex-1 overflow-y-auto px-4 py-12">
                 <div className="mx-auto max-w-5xl">
