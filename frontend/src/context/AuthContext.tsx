@@ -50,23 +50,39 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     // ── Silent refresh on mount ────────────────────────────────────────────
     useEffect(() => {
+        // Abort flag prevents stale async results from overwriting state when
+        // React StrictMode double-mounts (dev) or when the component unmounts
+        // before the refresh completes. Without this, two concurrent refresh
+        // calls race: the first blacklists the cookie, the second fails with
+        // 401, and if it resolves last it logs the user out.
+        let cancelled = false;
+
         const restoreSession = async () => {
             try {
                 const { data } = await apiClient.post("/auth/refresh");
+                if (cancelled) return;
                 setAccessToken(data.access_token);
                 // Fetch user profile with the fresh access token
                 const { data: userData } = await apiClient.get("/auth/me");
+                if (cancelled) return;
                 setUser(userData);
             } catch {
+                if (cancelled) return;
                 // No valid session — user stays logged out
                 setAccessToken(null);
                 setUser(null);
             } finally {
-                setIsLoading(false);
+                if (!cancelled) setIsLoading(false);
             }
         };
 
         restoreSession();
+
+        // On cleanup (unmount or StrictMode re-run), mark as cancelled so the
+        // first effect's pending promises don't clobber the second effect's state.
+        return () => {
+            cancelled = true;
+        };
     }, []);
 
     // ── Listen for forced logout from the API interceptor ──────────────────

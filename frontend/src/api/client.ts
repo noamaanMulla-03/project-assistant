@@ -65,8 +65,14 @@ apiClient.interceptors.response.use(
 			_retry?: boolean;
 		};
 
-		// Only attempt refresh on 401 and if we haven't already retried
-		if (error.response?.status !== 401 || originalRequest._retry) {
+		// Only attempt refresh on 401, if we haven't already retried, and the
+		// failing request is NOT the /auth/refresh endpoint itself (avoids
+		// infinite recursion when the refresh token is also expired).
+		if (
+			error.response?.status !== 401 ||
+			originalRequest._retry ||
+			originalRequest.url?.endsWith("/auth/refresh")
+		) {
 			return Promise.reject(error);
 		}
 
@@ -88,11 +94,9 @@ apiClient.interceptors.response.use(
 		isRefreshing = true;
 
 		try {
-			const { data } = await axios.post(
-				"/auth/refresh",
-				{},
-				{ withCredentials: true },
-			);
+			// Use apiClient (not raw axios) so the baseURL is respected in
+			// production. apiClient already has withCredentials: true set.
+			const { data } = await apiClient.post("/auth/refresh");
 			const newToken: string = data.access_token;
 			setAccessToken(newToken);
 			processQueue(null, newToken);
