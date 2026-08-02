@@ -6,6 +6,7 @@ import { Link, useNavigate } from "react-router-dom";
 import ThemeToggle from "../components/ThemeToggle";
 import { BackgroundBeams } from "../components/ui/background-beams";
 import { GlowingEffectCard } from "../components/ui/glowing-effect";
+import { extractErrorMessage } from "../components/utils";
 import { useAuth } from "../context/AuthContext";
 
 export default function Register() {
@@ -36,10 +37,7 @@ export default function Register() {
             await register(email, password, fullName);
             setSuccess(true);
         } catch (err: unknown) {
-            const detail =
-                (err as { response?: { data?: { detail?: string } } })?.response?.data
-                    ?.detail ?? "Registration failed.  Please try again.";
-            setError(detail);
+            setError(extractErrorMessage(err, "Registration failed. Please try again."));
         } finally {
             setIsSubmitting(false);
         }
@@ -50,10 +48,10 @@ export default function Register() {
         return (
             <BackgroundBeams>
                 <div className="flex min-h-screen items-center justify-center px-4 py-12">
-          {/* Theme toggle — fixed top-right */}
-          <div className="fixed right-4 top-4 z-50">
-            <ThemeToggle />
-          </div>
+                    {/* Theme toggle — fixed top-right */}
+                    <div className="fixed right-4 top-4 z-50">
+                        <ThemeToggle />
+                    </div>
                     <GlowingEffectCard className="w-full max-w-md">
                         <div className="rounded-2xl bg-zinc-900/95 p-8 text-center backdrop-blur-sm">
                             <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-green-500/20">
@@ -93,10 +91,10 @@ export default function Register() {
     return (
         <BackgroundBeams>
             <div className="flex min-h-screen items-center justify-center px-4 py-12">
-          {/* Theme toggle — fixed top-right */}
-          <div className="fixed right-4 top-4 z-50">
-            <ThemeToggle />
-          </div>
+                {/* Theme toggle — fixed top-right */}
+                <div className="fixed right-4 top-4 z-50">
+                    <ThemeToggle />
+                </div>
                 <GlowingEffectCard className="w-full max-w-md">
                     <div className="rounded-2xl bg-white dark:bg-surface-dark-900 p-8">
                         {/* Header */}

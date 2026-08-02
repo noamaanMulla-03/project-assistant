@@ -6,6 +6,7 @@ import { Link, useNavigate } from "react-router-dom";
 import ThemeToggle from "../components/ThemeToggle";
 import { BackgroundBeams } from "../components/ui/background-beams";
 import { GlowingEffectCard } from "../components/ui/glowing-effect";
+import { extractErrorMessage } from "../components/utils";
 import { useAuth } from "../context/AuthContext";
 
 export default function Login() {
@@ -26,10 +27,7 @@ export default function Login() {
             await login(email, password);
             navigate("/dashboard", { replace: true });
         } catch (err: unknown) {
-            const detail =
-                (err as { response?: { data?: { detail?: string } } })?.response?.data
-                    ?.detail ?? "Login failed.  Please try again.";
-            setError(detail);
+            setError(extractErrorMessage(err, "Login failed. Please try again."));
         } finally {
             setIsSubmitting(false);
         }
@@ -38,10 +36,10 @@ export default function Login() {
     return (
         <BackgroundBeams>
             <div className="flex min-h-screen items-center justify-center px-4 py-12">
-          {/* Theme toggle — fixed top-right */}
-          <div className="fixed right-4 top-4 z-50">
-            <ThemeToggle />
-          </div>
+                {/* Theme toggle — fixed top-right */}
+                <div className="fixed right-4 top-4 z-50">
+                    <ThemeToggle />
+                </div>
                 <GlowingEffectCard className="w-full max-w-md">
                     <div className="rounded-2xl bg-white dark:bg-surface-dark-900 p-8">
                         {/* Header */}
