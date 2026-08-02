@@ -149,11 +149,11 @@ project_assistant/
 
 ## Prerequisites
 
-| Tool | Version | Purpose |
-|------|---------|---------|
-| Docker + Docker Compose | Latest | Container orchestration |
-| Ollama | Latest | Local LLM inference |
-| `gpt-oss:120b-cloud` (or any model) | — | Pulled into Ollama for extraction |
+| Tool                                | Version | Purpose                           |
+| ----------------------------------- | ------- | --------------------------------- |
+| Docker + Docker Compose             | Latest  | Container orchestration           |
+| Ollama                              | Latest  | Local LLM inference               |
+| `gpt-oss:120b-cloud` (or any model) | —       | Pulled into Ollama for extraction |
 
 **Pull the LLM model into Ollama:**
 
@@ -181,10 +181,10 @@ docker compose up -d --build
 
 This starts three services:
 
-| Service | Container | Port | Description |
-|---------|-----------|------|-------------|
-| `db` | `pa-db` | 5432 | PostgreSQL 16 + pgvector |
-| `backend` | `pa-backend` | 8000 | FastAPI with hot-reload |
+| Service    | Container     | Port | Description              |
+| ---------- | ------------- | ---- | ------------------------ |
+| `db`       | `pa-db`       | 5432 | PostgreSQL 16 + pgvector |
+| `backend`  | `pa-backend`  | 8000 | FastAPI with hot-reload  |
 | `frontend` | `pa-frontend` | 5173 | Vite dev server with HMR |
 
 ### 3. Verify
@@ -254,56 +254,56 @@ VITE_API_BASE_URL=http://localhost:8000
 
 ### Auth (`/auth`)
 
-| Method | Path | Description | Auth |
-|--------|------|-------------|------|
-| `POST` | `/auth/register` | Create account | No |
-| `POST` | `/auth/login` | Login → access token + httpOnly refresh cookie | No |
-| `POST` | `/auth/refresh` | Exchange refresh cookie for new access token | Cookie |
-| `POST` | `/auth/logout` | Blacklist refresh token + clear cookie | Cookie |
-| `GET` | `/auth/me` | Get current user profile | Bearer |
+| Method | Path             | Description                                    | Auth   |
+| ------ | ---------------- | ---------------------------------------------- | ------ |
+| `POST` | `/auth/register` | Create account                                 | No     |
+| `POST` | `/auth/login`    | Login → access token + httpOnly refresh cookie | No     |
+| `POST` | `/auth/refresh`  | Exchange refresh cookie for new access token   | Cookie |
+| `POST` | `/auth/logout`   | Blacklist refresh token + clear cookie         | Cookie |
+| `GET`  | `/auth/me`       | Get current user profile                       | Bearer |
 
 ### Knowledge Base (`/knowledge`)
 
-| Method | Path | Description | Auth |
-|--------|------|-------------|------|
-| `POST` | `/knowledge/upload` | Upload a `.pdf`/`.docx`/`.txt` file (max 25 MB) | Bearer |
-| `GET` | `/knowledge/documents` | List all public documents (paginated) | Bearer |
-| `GET` | `/knowledge/documents/{id}` | Download document file | Bearer |
-| `GET` | `/knowledge/documents/{id}/text` | Get reconstructed text from chunks | Bearer |
-| `DELETE` | `/knowledge/documents/{id}` | Delete document + chunks + FAISS entries | Bearer |
-| `POST` | `/knowledge/search` | Semantic search via FAISS ANN | Bearer |
+| Method   | Path                             | Description                                     | Auth   |
+| -------- | -------------------------------- | ----------------------------------------------- | ------ |
+| `POST`   | `/knowledge/upload`              | Upload a `.pdf`/`.docx`/`.txt` file (max 25 MB) | Bearer |
+| `GET`    | `/knowledge/documents`           | List all public documents (paginated)           | Bearer |
+| `GET`    | `/knowledge/documents/{id}`      | Download document file                          | Bearer |
+| `GET`    | `/knowledge/documents/{id}/text` | Get reconstructed text from chunks              | Bearer |
+| `DELETE` | `/knowledge/documents/{id}`      | Delete document + chunks + FAISS entries        | Bearer |
+| `POST`   | `/knowledge/search`              | Semantic search via FAISS ANN                   | Bearer |
 
 ### Projects (`/projects`)
 
-| Method | Path | Description | Auth |
-|--------|------|-------------|------|
-| `POST` | `/projects` | Create project with 1–3 files (multipart) | Bearer |
-| `GET` | `/projects` | List user's projects (paginated) | Bearer |
-| `GET` | `/projects/{id}` | Get project with live doc statuses | Bearer |
+| Method   | Path                              | Description                                           | Auth   |
+| -------- | --------------------------------- | ----------------------------------------------------- | ------ |
+| `POST`   | `/projects`                       | Create project with 1–3 files (multipart)             | Bearer |
+| `GET`    | `/projects`                       | List user's projects (paginated)                      | Bearer |
+| `GET`    | `/projects/{id}`                  | Get project with live doc statuses                    | Bearer |
 | `DELETE` | `/projects/{pid}/documents/{did}` | Remove doc from project (deletes project if last doc) | Bearer |
-| `POST` | `/projects/{id}/analyze` | Run AI extraction pipeline (`?force=true` to re-run) | Bearer |
-| `PUT` | `/projects/{id}/review` | Save user-reviewed action summary | Bearer |
+| `POST`   | `/projects/{id}/analyze`          | Run AI extraction pipeline (`?force=true` to re-run)  | Bearer |
+| `PUT`    | `/projects/{id}/review`           | Save user-reviewed action summary                     | Bearer |
 
 ### Health
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/health` | Liveness probe → `{"status":"ok"}` |
+| Method | Path      | Description                        |
+| ------ | --------- | ---------------------------------- |
+| `GET`  | `/health` | Liveness probe → `{"status":"ok"}` |
 
 ---
 
 ## Frontend Routes
 
-| Path | Component | Auth | Description |
-|------|-----------|------|-------------|
-| `/login` | `Login` | Guest only | Email + password login |
-| `/register` | `Register` | Guest only | Create new account |
-| `/dashboard` | `Dashboard` | Required | User profile card |
-| `/knowledge` | `Knowledge` | Required | Upload/manage knowledge base docs |
-| `/project/new` | `ProjectNew` | Required | Create a new project (upload 1-3 files) |
-| `/project/:id` | `ProjectNew` | Required | Re-open existing project |
-| `/project/:id/results` | `ProjectResults` | Required | View AI extraction results |
-| `/project/:id/review` | `ProjectReview` | Required | Review workspace with document viewer |
+| Path                   | Component        | Auth       | Description                             |
+| ---------------------- | ---------------- | ---------- | --------------------------------------- |
+| `/login`               | `Login`          | Guest only | Email + password login                  |
+| `/register`            | `Register`       | Guest only | Create new account                      |
+| `/dashboard`           | `Dashboard`      | Required   | User profile card                       |
+| `/knowledge`           | `Knowledge`      | Required   | Upload/manage knowledge base docs       |
+| `/project/new`         | `ProjectNew`     | Required   | Create a new project (upload 1-3 files) |
+| `/project/:id`         | `ProjectNew`     | Required   | Re-open existing project                |
+| `/project/:id/results` | `ProjectResults` | Required   | View AI extraction results              |
+| `/project/:id/review`  | `ProjectReview`  | Required   | Review workspace with document viewer   |
 
 ---
 
@@ -324,12 +324,12 @@ The agent autonomously retrieves all documents, then searches for relevant polic
 
 Each phase is a **separate LLM call** with `with_structured_output()` (Ollama JSON schema mode), binding output to strict Pydantic schemas:
 
-| Phase | Schema | Purpose |
-|-------|--------|---------|
-| **1** | `PerDocumentExtraction` | Per-document: identify document type, extract facts/decisions/assumptions/risks/open questions/action items — one LLM call per document |
-| **2** | `ConflictDetectionResult` | Cross-document: detect contradictory statements and repeated content |
-| **3** | `PolicyGapResult` | Policy compliance: find missing actions and missing questions based on policy chunks |
-| **4** | `SummaryResult` | Synthesise a compressed digest of Phases 1–3 into an executive summary |
+| Phase | Schema                    | Purpose                                                                                                                                 |
+| ----- | ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| **1** | `PerDocumentExtraction`   | Per-document: identify document type, extract facts/decisions/assumptions/risks/open questions/action items — one LLM call per document |
+| **2** | `ConflictDetectionResult` | Cross-document: detect contradictory statements and repeated content                                                                    |
+| **3** | `PolicyGapResult`         | Policy compliance: find missing actions and missing questions based on policy chunks                                                    |
+| **4** | `SummaryResult`           | Synthesise a compressed digest of Phases 1–3 into an executive summary                                                                  |
 
 ### Result Assembly
 
@@ -365,17 +365,17 @@ docker compose exec backend alembic downgrade -1          # Rollback last migrat
 
 **Migration history** (9 versions in `backend/alembic/versions/`):
 
-| Revision | Description |
-|----------|-------------|
+| Revision       | Description                                                  |
+| -------------- | ------------------------------------------------------------ |
 | `0b95bf9b4587` | Initial schema (users, knowledge_documents, document_chunks) |
-| `a1b2c3d4e5f6` | Add knowledge_documents table refinements |
-| `c7d8e9f0a1b2` | Add document_chunks with pgvector embedding column |
-| `d4e5f6a7b8c9` | Add status column to knowledge_documents |
-| `e5f6a7b8c9d0` | Add projects table with ARRAY(UUID) + JSONB cache columns |
-| `f0a1b2c3d4e5` | Add metadata_json to document_chunks |
-| `g1h2i3j4k5l6` | Add visibility column to knowledge_documents |
-| `h2i3j4k5l6m7` | Add analysis_result JSONB to projects |
-| `i3j4k5l6m7n8` | Add review_summary JSONB to projects |
+| `a1b2c3d4e5f6` | Add knowledge_documents table refinements                    |
+| `c7d8e9f0a1b2` | Add document_chunks with pgvector embedding column           |
+| `d4e5f6a7b8c9` | Add status column to knowledge_documents                     |
+| `e5f6a7b8c9d0` | Add projects table with ARRAY(UUID) + JSONB cache columns    |
+| `f0a1b2c3d4e5` | Add metadata_json to document_chunks                         |
+| `g1h2i3j4k5l6` | Add visibility column to knowledge_documents                 |
+| `h2i3j4k5l6m7` | Add analysis_result JSONB to projects                        |
+| `i3j4k5l6m7n8` | Add review_summary JSONB to projects                         |
 
 ---
 
@@ -396,15 +396,15 @@ docker compose exec backend python -m pytest tests/test_faiss_service.py::test_s
 
 ### Test Coverage
 
-| File | Tests | What it covers |
-|------|-------|----------------|
-| `test_extraction_schemas.py` | 3 | Pydantic literal enforcement (confidence, severity), empty conflict handling |
-| `test_extraction_pipeline.py` | 7 | Document type assembly, per-doc flattening, empty docs, conflict/gap assembly, Phase 4 compression |
-| `test_faiss_service.py` | 5 | Build index, add chunks (idempotent mapping), search (top-k, self-match ≈1.0, empty index) |
-| `test_auth.py` | 5 | Register (success, duplicate 409), login (success, invalid 401), refresh (missing cookie 401), logout |
-| `test_knowledge_crud.py` | 4 | List (empty, with data), delete (404), search (no hits, with hits) |
-| `test_routers.py` | 3 | Review save (success, 409 no-analysis, 403 wrong user) |
-| `test_project_crud.py` | 5 | List empty, get 404, analyze (cached return, force re-run, 403), review save (success, 409 no-analysis) |
+| File                          | Tests | What it covers                                                                                          |
+| ----------------------------- | ----- | ------------------------------------------------------------------------------------------------------- |
+| `test_extraction_schemas.py`  | 3     | Pydantic literal enforcement (confidence, severity), empty conflict handling                            |
+| `test_extraction_pipeline.py` | 7     | Document type assembly, per-doc flattening, empty docs, conflict/gap assembly, Phase 4 compression      |
+| `test_faiss_service.py`       | 5     | Build index, add chunks (idempotent mapping), search (top-k, self-match ≈1.0, empty index)              |
+| `test_auth.py`                | 5     | Register (success, duplicate 409), login (success, invalid 401), refresh (missing cookie 401), logout   |
+| `test_knowledge_crud.py`      | 4     | List (empty, with data), delete (404), search (no hits, with hits)                                      |
+| `test_routers.py`             | 3     | Review save (success, 409 no-analysis, 403 wrong user)                                                  |
+| `test_project_crud.py`        | 5     | List empty, get 404, analyze (cached return, force re-run, 403), review save (success, 409 no-analysis) |
 
 All tests use mocked DB sessions — no real PostgreSQL required. The FAISS tests use a real `FAISSService` instance with synthetic 384-d normalized vectors.
 
@@ -431,31 +431,31 @@ test-docs/
 
 ## Tech Stack
 
-| Layer | Technology | Version |
-|-------|-----------|---------|
-| **Frontend** | React | 19 |
-| | Vite | 6 |
-| | TypeScript | 5.7 |
-| | Tailwind CSS | 3.4 |
-| | React Router | 7 |
-| | Motion (Framer) | 12 |
-| | React Markdown | 10 |
-| | Axios | 1.7 |
-| **Backend** | Python | 3.12 |
-| | FastAPI | 0.115+ |
-| | SQLAlchemy (async) | 2.0+ |
-| | Pydantic | 2.0+ |
-| | Alembic | 1.14+ |
-| | python-jose (JWT) | 3.3+ |
-| | passlib (bcrypt) | 1.7+ |
-| **AI/ML** | LangChain | 0.3+ |
-| | LangGraph | 0.2+ |
-| | langchain-ollama | 0.2+ |
-| | langchain-huggingface | 0.1+ |
-| | sentence-transformers | 3.0+ |
-| | FAISS | 1.8+ |
-| | Ollama | Latest |
-| **Database** | PostgreSQL | 16 |
-| | pgvector | 0.3+ (extension) |
-| **Infra** | Docker Compose | Latest |
-| | uv (Python package manager) | Latest |
+| Layer        | Technology                  | Version          |
+| ------------ | --------------------------- | ---------------- |
+| **Frontend** | React                       | 19               |
+|              | Vite                        | 6                |
+|              | TypeScript                  | 5.7              |
+|              | Tailwind CSS                | 3.4              |
+|              | React Router                | 7                |
+|              | Motion (Framer)             | 12               |
+|              | React Markdown              | 10               |
+|              | Axios                       | 1.7              |
+| **Backend**  | Python                      | 3.12             |
+|              | FastAPI                     | 0.115+           |
+|              | SQLAlchemy (async)          | 2.0+             |
+|              | Pydantic                    | 2.0+             |
+|              | Alembic                     | 1.14+            |
+|              | python-jose (JWT)           | 3.3+             |
+|              | passlib (bcrypt)            | 1.7+             |
+| **AI/ML**    | LangChain                   | 0.3+             |
+|              | LangGraph                   | 0.2+             |
+|              | langchain-ollama            | 0.2+             |
+|              | langchain-huggingface       | 0.1+             |
+|              | sentence-transformers       | 3.0+             |
+|              | FAISS                       | 1.8+             |
+|              | Ollama                      | Latest           |
+| **Database** | PostgreSQL                  | 16               |
+|              | pgvector                    | 0.3+ (extension) |
+| **Infra**    | Docker Compose              | Latest           |
+|              | uv (Python package manager) | Latest           |
