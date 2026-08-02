@@ -116,6 +116,7 @@ export async function deleteDocument(id: string): Promise<void> {
 
 export interface DocumentText {
 	filename: string;
+	file_type: string; // "pdf" | "docx" | "txt" — drives frontend rendering
 	content: string;
 }
 

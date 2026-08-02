@@ -49,6 +49,19 @@ def _validate_extension(filename: str) -> str:
     return ext
 
 
+# Map file_type to the correct MIME for inline browser rendering
+_MIME_MAP: dict[str, str] = {
+    "pdf": "application/pdf",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "txt": "text/plain",
+}
+
+
+def _mime_for_type(file_type: str) -> str:
+    """Return the correct MIME type for a file type, defaulting to octet-stream."""
+    return _MIME_MAP.get(file_type, "application/octet-stream")
+
+
 def _resolve_upload_path() -> Path:
     """Return the absolute upload directory, creating it if needed."""
     path = Path(settings.UPLOAD_DIR).resolve()
@@ -227,7 +240,7 @@ async def download_document(
     return FileResponse(
         path=str(disk_path),
         filename=doc.filename,
-        media_type="application/octet-stream",
+        media_type=_mime_for_type(doc.file_type),
     )
 
 
@@ -429,4 +442,8 @@ async def get_document_text(
     # Concatenate chunk text with double-newline separators for readability
     content = "\n\n".join(c.content for c in chunks)
 
-    return DocumentTextResponse(filename=doc.filename, content=content)
+    return DocumentTextResponse(
+        filename=doc.filename,
+        file_type=doc.file_type,
+        content=content,
+    )

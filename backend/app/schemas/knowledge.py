@@ -91,7 +91,8 @@ class SearchResponse(BaseModel):
 
 
 class DocumentTextResponse(BaseModel):
-    """Full reconstructed text of a document with its filename."""
+    """Full reconstructed text of a document with its filename and type."""
 
     filename: str
+    file_type: str  # "pdf" | "docx" | "txt" — drives frontend rendering
     content: str

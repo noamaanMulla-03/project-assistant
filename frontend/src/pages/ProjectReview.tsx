@@ -9,11 +9,12 @@
 //   • Pure CSS accordion cards (grid-rows trick, no runtime animation library)
 //   • react-split for the horizontal divider, height inherited from parent
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Split from "react-split";
 import { motion, AnimatePresence } from "motion/react";
 import { cn } from "../components/utils";
 import { fetchDocumentText } from "../api/knowledge";
+import apiClient from "../api/client";
 import { useParams } from "react-router-dom";
 import ProjectNavbar from "../components/ProjectNavbar";
 import {
@@ -54,6 +55,7 @@ interface SelectedSource {
     documentId: string;
     documentName: string;
     section: string;
+    fileType: string; // drives rendering: "pdf" → iframe, "docx"/"txt" → paragraphs
 }
 
 type TabId = "facts" | "conflicts" | "actions";
@@ -64,9 +66,9 @@ type TabId = "facts" | "conflicts" | "actions";
 
 function buildDocLookup(
     docs: ProjectDocumentRef[],
-): Map<string, { id: string; filename: string }> {
-    const map = new Map<string, { id: string; filename: string }>();
-    for (const d of docs) map.set(d.filename, { id: d.id, filename: d.filename });
+): Map<string, { id: string; filename: string; file_type: string }> {
+    const map = new Map<string, { id: string; filename: string; file_type: string }>();
+    for (const d of docs) map.set(d.filename, { id: d.id, filename: d.filename, file_type: d.file_type });
     return map;
 }
 
@@ -94,11 +96,6 @@ const CLASSIFICATION_COLORS: Record<string, string> = {
     unresolved: "bg-red-100 text-red-700 dark:bg-red-950/30 dark:text-red-400",
 };
 
-const STATUS_COLORS: Record<string, string> = {
-    pending: "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400",
-    approved: "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400",
-    rejected: "bg-red-100 text-red-700 dark:bg-red-950/30 dark:text-red-400",
-};
 
 const PRIORITY_COLORS: Record<string, string> = {
     high: "bg-red-100 text-red-700 dark:bg-red-950/30 dark:text-red-400",
@@ -272,6 +269,7 @@ function FactCard({
     index,
     open,
     docId,
+    docType,
     onToggle,
     onUpdate,
     onViewSource,
@@ -282,7 +280,8 @@ function FactCard({
     docId: string;
     onToggle: () => void;
     onUpdate: (index: number, patch: Partial<FactReviewItem>) => void;
-    onViewSource: (docId: string, docName: string, section: string) => void;
+    onViewSource: (docId: string, docName: string, section: string, fileType: string) => void;
+    docType: string;
 }) {
     // Truncate content for collapsed header display
     const truncated = item.content.length > 80 ? item.content.slice(0, 80) + "\u2026" : item.content;
@@ -327,7 +326,7 @@ function FactCard({
                     {item.confidence}
                 </span>
                 <div className="ml-auto">
-                    <SourceButton document={item.source_document} section={item.source_section} onClick={() => onViewSource(docId, item.source_document, item.source_section)} />
+                    <SourceButton document={item.source_document} section={item.source_section} onClick={() => onViewSource(docId, item.source_document, item.source_section, docType)} />
                 </div>
             </div>
         </AccordionCard>
@@ -344,6 +343,8 @@ function ConflictCard({
     open,
     docIdA,
     docIdB,
+    docTypeA,
+    docTypeB,
     onToggle,
     onUpdate,
     onViewSource,
@@ -355,7 +356,9 @@ function ConflictCard({
     docIdB: string;
     onToggle: () => void;
     onUpdate: (index: number, patch: Partial<ConflictReviewItem>) => void;
-    onViewSource: (docId: string, docName: string, section: string) => void;
+    onViewSource: (docId: string, docName: string, section: string, fileType: string) => void;
+    docTypeA: string;
+    docTypeB: string;
 }) {
     const truncated = item.statement_a.length > 60 ? item.statement_a.slice(0, 60) + "\u2026" : item.statement_a;
 
@@ -390,12 +393,12 @@ function ConflictCard({
                 <div className="rounded-md border border-red-200 bg-red-50/50 p-3 dark:border-red-800 dark:bg-red-950/20">
                     <p className="mb-2 text-xs font-medium text-red-600 dark:text-red-400">Statement A — {item.document_a}</p>
                     <blockquote className="text-xs leading-relaxed text-surface-700 dark:text-surface-dark-200">{item.statement_a}</blockquote>
-                    <button type="button" onClick={() => onViewSource(docIdA, item.document_a, item.section_a)} className="mt-2 text-xs text-primary-500 hover:underline">View source · {item.section_a}</button>
+                    <button type="button" onClick={() => onViewSource(docIdA, item.document_a, item.section_a, docTypeA)} className="mt-2 text-xs text-primary-500 hover:underline">View source · {item.section_a}</button>
                 </div>
                 <div className="rounded-md border border-red-200 bg-red-50/50 p-3 dark:border-red-800 dark:bg-red-950/20">
                     <p className="mb-2 text-xs font-medium text-red-600 dark:text-red-400">Statement B — {item.document_b}</p>
                     <blockquote className="text-xs leading-relaxed text-surface-700 dark:text-surface-dark-200">{item.statement_b}</blockquote>
-                    <button type="button" onClick={() => onViewSource(docIdB, item.document_b, item.section_b)} className="mt-2 text-xs text-primary-500 hover:underline">View source · {item.section_b}</button>
+                    <button type="button" onClick={() => onViewSource(docIdB, item.document_b, item.section_b, docTypeB)} className="mt-2 text-xs text-primary-500 hover:underline">View source · {item.section_b}</button>
                 </div>
             </div>
             <input
@@ -443,6 +446,7 @@ function ActionItemCard({
     index,
     open,
     docId,
+    docType,
     onToggle,
     onUpdate,
     onViewSource,
@@ -453,7 +457,8 @@ function ActionItemCard({
     docId: string;
     onToggle: () => void;
     onUpdate: (index: number, patch: Partial<ActionReviewItem>) => void;
-    onViewSource: (docId: string, docName: string, section: string) => void;
+    onViewSource: (docId: string, docName: string, section: string, fileType: string) => void;
+    docType: string;
 }) {
     const truncated = item.edited_content.length > 70 ? item.edited_content.slice(0, 70) + "\u2026" : item.edited_content;
     const statusDot: Record<ActionReviewItem["status"], string> = {
@@ -499,7 +504,7 @@ function ActionItemCard({
                 <span className={cn("rounded px-1.5 py-0.5 text-xs font-medium", PRIORITY_COLORS[item.priority] ?? PRIORITY_COLORS.medium)}>{item.priority}</span>
                 {item.deadline && <span className="text-xs text-surface-500 dark:text-surface-dark-400">deadline: {item.deadline}</span>}
                 <div className="ml-auto">
-                    <SourceButton document={item.source_document} section={item.source_section} onClick={() => onViewSource(docId, item.source_document, item.source_section)} />
+                    <SourceButton document={item.source_document} section={item.source_section} onClick={() => onViewSource(docId, item.source_document, item.source_section, docType)} />
                 </div>
             </div>
         </AccordionCard>
@@ -508,22 +513,68 @@ function ActionItemCard({
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  Document Viewer (right pane)
+//  PDF: rendered natively via iframe (blob URL, browser handles inline).
+//  DOCX/TXT: reconstructed text from backend chunks, displayed as styled
+//  paragraphs with section highlighting and auto-scroll.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 function DocumentViewer({ source }: { source: SelectedSource | null }) {
-    const [text, setText] = useState<string | null>(null);
+    const [content, setContent] = useState<string | null>(null); // text for DOCX/TXT; blob URL for PDF
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const scrollRef = useRef<HTMLDivElement>(null);
+    const paraRefs = useRef<Map<number, HTMLParagraphElement>>(new Map());
 
     useEffect(() => {
-        if (!source) { setText(null); setError(null); return; }
+        if (!source) {
+            setContent(null);
+            setError(null);
+            return;
+        }
+
         setLoading(true);
         setError(null);
+        setContent(null);
+        paraRefs.current.clear();
+
+        // PDF: fetch as blob → object URL → render in iframe
+        if (source.fileType === "pdf") {
+            let objectUrl: string | null = null;
+            apiClient
+                .get(`/knowledge/documents/${source.documentId}`, { responseType: "blob" })
+                .then((res) => {
+                    const blob = new Blob([res.data], { type: "application/pdf" });
+                    objectUrl = URL.createObjectURL(blob);
+                    setContent(objectUrl);
+                })
+                .catch(() => setError("Failed to load PDF."))
+                .finally(() => setLoading(false));
+            // Revoke the object URL when source changes or component unmounts
+            return () => {
+                if (objectUrl) URL.revokeObjectURL(objectUrl);
+            };
+        }
+
+        // DOCX / TXT: fetch reconstructed text from backend chunks
         fetchDocumentText(source.documentId)
-            .then((data) => setText(data.content))
+            .then((data) => setContent(data.content))
             .catch(() => setError("Failed to load document text."))
             .finally(() => setLoading(false));
-    }, [source]);
+    }, [source?.documentId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    // Auto-scroll to the first highlighted paragraph after text loads (DOCX/TXT only)
+    useEffect(() => {
+        if (!content || loading || source?.fileType === "pdf" || !scrollRef.current) return;
+        const paragraphs = content.split("\n\n").filter(Boolean);
+        const targetIdx = paragraphs.findIndex((p) => p.includes(source!.section));
+        if (targetIdx === -1) return;
+        const el = paraRefs.current.get(targetIdx);
+        if (el) {
+            requestAnimationFrame(() => {
+                el.scrollIntoView({ behavior: "smooth", block: "center" });
+            });
+        }
+    }, [content, loading, source]);
 
     // ── Empty state ─────────────────────────────────────────────────────
     if (!source) {
@@ -542,7 +593,7 @@ function DocumentViewer({ source }: { source: SelectedSource | null }) {
         );
     }
 
-    if (loading) {
+    if (loading || !content) {
         return (
             <div className="flex h-full items-center justify-center bg-surface-50 dark:bg-surface-dark-950">
                 <p className="text-sm text-surface-400 dark:text-surface-dark-500">Loading document...</p>
@@ -558,7 +609,29 @@ function DocumentViewer({ source }: { source: SelectedSource | null }) {
         );
     }
 
-    const paragraphs = (text ?? "").split("\n\n").filter(Boolean);
+    // ── Render ───────────────────────────────────────────────────────────
+    const typeLabel = source.fileType.toUpperCase();
+
+    // PDF: render natively via iframe (browser handles inline PDF viewing)
+    if (source.fileType === "pdf") {
+        return (
+            <div className="flex h-full flex-col overflow-hidden">
+                <div className="flex shrink-0 items-center gap-2 border-b border-surface-200 bg-white/90 px-4 py-2 backdrop-blur dark:border-surface-dark-700 dark:bg-surface-dark-950/90">
+                    <svg className="h-4 w-4 text-surface-400 dark:text-surface-dark-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+                        <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+                    </svg>
+                    <span className="truncate text-sm font-medium text-surface-700 dark:text-surface-dark-200">{source.documentName}</span>
+                    <span className="shrink-0 rounded bg-surface-200 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-surface-500 dark:bg-surface-dark-700 dark:text-surface-dark-400">{typeLabel}</span>
+                    <span className="shrink-0 rounded-full bg-yellow-100 px-2 py-0.5 text-xs font-medium text-yellow-700 dark:bg-yellow-800/60 dark:text-yellow-200">§ {source.section}</span>
+                </div>
+                <iframe src={content!} className="h-full w-full border-0" title={source.documentName} />
+            </div>
+        );
+    }
+
+    // DOCX / TXT: reconstructed text with section highlighting + auto-scroll
+    const paragraphs = (content ?? "").split("\n\n").filter(Boolean);
 
     return (
         <div className="flex h-full flex-col overflow-hidden bg-white dark:bg-surface-dark-950">
@@ -569,16 +642,18 @@ function DocumentViewer({ source }: { source: SelectedSource | null }) {
                     <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
                 </svg>
                 <span className="truncate text-sm font-medium text-surface-700 dark:text-surface-dark-200">{source.documentName}</span>
-                <span className="ml-auto shrink-0 rounded-full bg-yellow-100 px-2 py-0.5 text-xs font-medium text-yellow-700 dark:bg-yellow-800/60 dark:text-yellow-200">§ {source.section}</span>
+                <span className="shrink-0 rounded bg-surface-200 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-surface-500 dark:bg-surface-dark-700 dark:text-surface-dark-400">{typeLabel}</span>
+                <span className="shrink-0 rounded-full bg-yellow-100 px-2 py-0.5 text-xs font-medium text-yellow-700 dark:bg-yellow-800/60 dark:text-yellow-200">§ {source.section}</span>
             </div>
 
-            {/* Document body — sans-serif prose, no motion animations */}
-            <div className="flex-1 overflow-y-auto px-5 py-4 text-sm leading-relaxed text-surface-700 dark:text-surface-dark-200">
+            {/* Document body — auto-scrolls to highlighted paragraph */}
+            <div ref={scrollRef} className="flex-1 overflow-y-auto px-5 py-4 text-sm leading-relaxed text-surface-700 dark:text-surface-dark-200">
                 {paragraphs.map((para, i) => {
                     const isHighlighted = para.includes(source.section);
                     return (
                         <p
                             key={i}
+                            ref={(el) => { if (el) paraRefs.current.set(i, el); }}
                             className={cn(
                                 "mb-3 rounded-lg px-3 py-2",
                                 isHighlighted
@@ -688,8 +763,8 @@ function ProjectReviewWorkspace({ result, documents }: ProjectReviewProps) {
         });
     }, []);
 
-    const handleViewSource = useCallback((docId: string, docName: string, section: string) => {
-        setSelectedSource({ documentId: docId, documentName: docName, section });
+    const handleViewSource = useCallback((docId: string, docName: string, section: string, fileType: string) => {
+        setSelectedSource({ documentId: docId, documentName: docName, section, fileType });
     }, []);
 
     const toggleCard = useCallback((index: number) => {
@@ -748,6 +823,7 @@ function ProjectReviewWorkspace({ result, documents }: ProjectReviewProps) {
                                             key={i} item={item} index={i}
                                             open={expandedCards.has(i)}
                                             docId={docRef?.id ?? ""}
+                                            docType={docRef?.file_type ?? ""}
                                             onToggle={() => toggleCard(i)}
                                             onUpdate={updateFact}
                                             onViewSource={handleViewSource}
@@ -778,6 +854,7 @@ function ProjectReviewWorkspace({ result, documents }: ProjectReviewProps) {
                                             key={i} item={item} index={i}
                                             open={expandedCards.has(1000 + i)}
                                             docIdA={docRefA?.id ?? ""} docIdB={docRefB?.id ?? ""}
+                                            docTypeA={docRefA?.file_type ?? ""} docTypeB={docRefB?.file_type ?? ""}
                                             onToggle={() => toggleCard(1000 + i)}
                                             onUpdate={updateConflict}
                                             onViewSource={handleViewSource}
@@ -807,6 +884,7 @@ function ProjectReviewWorkspace({ result, documents }: ProjectReviewProps) {
                                             key={i} item={item} index={i}
                                             open={expandedCards.has(2000 + i)}
                                             docId={docRef?.id ?? ""}
+                                            docType={docRef?.file_type ?? ""}
                                             onToggle={() => toggleCard(2000 + i)}
                                             onUpdate={updateActionItem}
                                             onViewSource={handleViewSource}
