@@ -3,15 +3,14 @@
 # an organizational policy knowledge base.
 #
 # Architecture:
-#   The LLM (qwen2.5:14b with strong function-calling) is given two tools:
-#     1. retrieve_document_chunks(filename) — fetch chunks from pgvector
-#     2. search_policy_kb(query)            — FAISS semantic search on policies
-#   The agent autonomously explores: reads each document, searches for relevant
-#   policies based on what it finds, then produces a natural-language summary.
-#   The backend then feeds that summary + all tool outputs into a final
-#   with_structured_output(ExtractionResult) call to produce typed JSON.
+#   Phase A — Agent: The LLM is given two @tools (retrieve documents from
+#     pgvector, search policies via FAISS) and autonomously explores.
+#   Phase B — 4-phase structured pipeline: Per-document extraction, cross-
+#     document conflict detection, policy-gap analysis, executive summary.
+#     Each phase uses Ollama's native JSON schema mode (via
+#     with_structured_output) which constrains token sampling to the exact
+#     Pydantic schema — no post-hoc parsing, regex, or synonym maps needed.
 
-import asyncio
 import logging
 from uuid import UUID
 
@@ -22,7 +21,13 @@ from sqlalchemy.orm import selectinload
 
 from app.config import settings
 from app.models.knowledge import DocumentChunk, KnowledgeDocument
-from app.schemas.extraction import ExtractionResult
+from app.schemas.extraction import (
+    ConflictDetectionResult,
+    ExtractionResult,
+    PerDocumentExtraction,
+    PolicyGapResult,
+    SummaryResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,31 +51,43 @@ async def run_extraction(
 
     tools = await _build_tools(db, project_doc_ids)
 
+    # ── Native async agent invocation (no more asyncio.to_thread) ──
     try:
-        agent_result = await asyncio.to_thread(_run_agent, doc_names, tools)
+        agent_result = await _run_agent(doc_names, tools)
     except RuntimeError:
         raise
     except Exception as exc:
         logger.exception("Agent execution failed")
         raise RuntimeError(
             f"LLM agent failed: {exc}. "
-            f"Check that your GROQ_API_KEY is set and the model "
-            f"'{settings.GROQ_MODEL}' is accessible."
+            f"Check that Ollama is running and the model "
+            f"'{settings.OLLAMA_MODEL}' is pulled."
         ) from exc
 
-    full_context = await _compile_context(db, project_doc_ids, agent_result)
+    # ── Fetch document chunks per-file for Phase 1 ──
+    doc_data = await _fetch_document_data(db, project_doc_ids)
 
-    logger.info(
-        "Running final structured extraction (context=%d chars)", len(full_context)
-    )
-    return await asyncio.to_thread(
-        _invoke_structured, _EXTRACTION_SYSTEM_PROMPT, full_context, ExtractionResult
-    )
+    # ── Extract policy lines from agent output for Phase 3 ──
+    policy_lines = _extract_policy_lines(agent_result)
+
+    logger.info("Running 4-phase structured extraction pipeline")
+    # ── continued: _run_structured_pipeline stays sync (LLM calls are
+    #    internally synchronous), but it's wrapped in to_thread for safety ──
+    import asyncio
+
+    return await asyncio.to_thread(_run_structured_pipeline, doc_data, policy_lines)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Prompts
 # ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Agent no longer produces a redundant full summary ───────────────
+# Previously the agent was instructed to produce a "concise natural-language
+# summary" at the end of its run.  That summary was never consumed downstream
+# (only the tool outputs are used).  Phase 4 already synthesises the final
+# executive summary, so the agent's summary was wasted inference.  Now the
+# agent simply signals completion with a terse list of discovered topics.
 
 _AGENT_SYSTEM_PROMPT = """\
 You are a document exploration agent. Your ONLY job is to gather information \
@@ -93,73 +110,173 @@ Your workflow:
    that's what the document mentions.
 3. If your first policy search reveals new topics, follow up with additional
    targeted searches.
-4. When you have gathered sufficient information, produce a concise natural-
-   language summary of what you found: document types, key themes, notable
-   facts and decisions, risks identified, any apparent contradictions between
-   documents, and policy areas that should be checked.
+4. When you have gathered sufficient information, output ONLY the exact phrase
+   "EXPLORATION COMPLETE" followed by a terse bullet list of discovered topics
+   and policy areas (single words or short phrases, NOT full sentences).
+   Do NOT write a narrative summary, analysis, or recommendations — the
+   downstream pipeline handles all synthesis.
 """
 
-_EXTRACTION_SYSTEM_PROMPT = """\
-You are a human-in-the-loop document extraction assistant. You are given \
-the complete text of project documents and relevant organizational policies. \
-Your job is to produce a structured extraction — you do NOT make decisions \
-or assign tasks.
+_PHASE1_PER_DOC_PROMPT = """\
+You are a document extraction specialist. You are given the text chunks of \
+a SINGLE project document. Extract everything you can find into the exact \
+JSON fields specified below.  The primary body text ALWAYS goes in \"content\".
 
-The context contains:
-  [DOCUMENT: <filename>]
-  [SECTION: chunk <n> (<metadata>)]
-  <text content>
-  ... (chunks from all project documents)
+Output a JSON object with these EXACT top-level keys and sub-fields:
 
-  [POLICY: <filename>]
-  [SECTION: chunk <n> (<metadata>)]
-  <text content>
-  ... (policy chunks found by the exploration agent)
+{
+  "document_type": "<string>",
+  "facts": [
+    {
+      "content": "<the fact text — FIELD NAME IS content, NOT statement>",
+      "confidence": "high" | "medium" | "low",
+      "source_document": "<filename matching [DOCUMENT: ...]>",
+      "source_section": "<section label matching [SECTION: ...]>"
+    }
+  ],
+  "decisions": [
+    {
+      "content": "<the decision text — FIELD NAME IS content, NOT decision>",
+      "stakeholders": ["<name or role>"],
+      "source_document": "<filename>",
+      "source_section": "<section label>"
+    }
+  ],
+  "assumptions": [
+    {
+      "content": "<the assumption text — FIELD NAME IS content, NOT assumption>",
+      "validation_needed": true | false,
+      "source_document": "<filename>",
+      "source_section": "<section label>"
+    }
+  ],
+  "risks": [
+    {
+      "content": "<the risk description — FIELD NAME IS content, NOT risk>",
+      "severity": "critical" | "high" | "medium" | "low",
+      "mitigation": "<mitigation if mentioned, otherwise empty string \"\">",
+      "source_document": "<filename>",
+      "source_section": "<section label>"
+    }
+  ],
+  "open_questions": [
+    {
+      "content": "<the question text — FIELD NAME IS content, NOT question>",
+      "suggested_owner": "<name or role if inferable, otherwise empty string \"\">",
+      "source_document": "<filename>",
+      "source_section": "<section label>"
+    }
+  ],
+  "action_items": [
+    {
+      "content": "<the task description — FIELD NAME IS content, NOT description>",
+      "priority": "high" | "medium" | "low",
+      "deadline": "<deadline if mentioned, otherwise empty string \"\">",
+      "source_document": "<filename>",
+      "source_section": "<section label>"
+    }
+  ]
+}
 
-Extract the following:
+ABSOLUTE RULES — VIOLATING ANY OF THESE WILL CAUSE A PARSE FAILURE:
+1. The primary text ALWAYS goes in the field named \"content\".  NEVER use
+   \"statement\", \"decision\", \"assumption\", \"risk\", \"question\",
+   \"description\", \"owner\", \"due_date\", or any other alias.
+2. \"mitigation\", \"suggested_owner\", and \"deadline\" are STRING fields.
+   If no value is available, use \"\" (empty string).  NEVER use null.
+3. Every array must be present, even if empty: [].
+4. NEVER add fields beyond those shown above.
+5. Output ONLY the JSON object.  No markdown fences, no explanatory text.
+"""
 
-1. SUMMARY — Identify what type each DOCUMENT is and write an executive
-   summary covering key themes, notable facts, decisions, risks, conflicts,
-   and policy gaps across all loaded files.
+_PHASE2_CONFLICT_PROMPT = """\
+You are a cross-document analyst. You are given structured summaries of \
+multiple project documents (facts, decisions, assumptions, risks, etc).
+Your ONLY job is to find conflicts and repeated statements.
 
-2. FACTS — Confirmed, verifiable statements.  Assign confidence:
-   'high' for definitive, 'medium' for qualified, 'low' for hedged.
+Output a JSON object with these EXACT keys and sub-fields:
 
-3. DECISIONS — Choices made and recorded.  Include stakeholders when mentioned.
+{
+  "conflicts": [
+    {
+      "statement_a": "<first contradictory statement>",
+      "statement_b": "<second contradictory statement>",
+      "document_a": "<filename of statement_a>",
+      "document_b": "<filename of statement_b>",
+      "section_a": "<section of statement_a>",
+      "section_b": "<section of statement_b>",
+      "resolution_suggestion": "<suggested resolution, or empty string \"\">"
+    }
+  ],
+  "repeated_statements": [
+    {
+      "statement": "<the repeated content>",
+      "document_a": "<first document filename>",
+      "document_b": "<second document filename>",
+      "section_a": "<section in first document>",
+      "section_b": "<section in second document>",
+      "is_exact_match": true | false
+    }
+  ]
+}
 
-4. ASSUMPTIONS — Premises taken for granted without proof.
-   Mark validation_needed=true unless trivially true.
+ABSOLUTE RULES:
+1. "resolution_suggestion" is a STRING.  Use \"\" if none, NEVER null.
+2. Every array must be present, even if empty: [].
+3. NEVER add fields beyond those shown above.
+4. Output ONLY the JSON object, no markdown, no explanation.
+"""
 
-5. RISKS — Potential negative outcomes, threats, or failure modes.
-   Assign severity ('critical', 'high', 'medium', 'low') and include mitigation.
+_PHASE3_POLICY_GAP_PROMPT = """\
+You are a policy compliance analyst. You are given:
+1. Structured summaries of project documents (facts, decisions, risks, etc.)
+2. Relevant organizational policy chunks
 
-6. OPEN QUESTIONS — Questions the documents raise but don't answer.
-   Suggest an owner role if inferable.
+Find gaps between what the project documents contain and what policies require.
 
-7. ACTION ITEMS — Tasks EXPLICITLY stated in the source text.
-   NEVER invent or auto-assign tasks.  Empty list if none exist.
+Output a JSON object with these EXACT keys and sub-fields:
 
-8. DOCUMENT CONFLICTS — Statements in different DOCUMENT blocks that
-   contradict each other.  Quote both, name both documents, suggest resolution.
+{
+  "missing_actions": [
+    {
+      "description": "<what action is missing>",
+      "policy_reference": "<policy document filename>",
+      "policy_section": "<section/chunk in the policy>",
+      "urgency": "critical" | "high" | "medium" | "low"
+    }
+  ],
+  "missing_questions": [
+    {
+      "question": "<the question that should be asked>",
+      "policy_reference": "<policy document filename>",
+      "policy_section": "<section/chunk in the policy>",
+      "urgency": "critical" | "high" | "medium" | "low"
+    }
+  ]
+}
 
-9. REPEATED STATEMENTS — Identical or substantially similar statements found
-   in multiple documents.  Mark is_exact_match=true for word-for-word matches.
+ABSOLUTE RULES:
+1. "description" and "question" are STRING fields.  Never null.
+2. Every array must be present, even if empty: [].
+3. NEVER add fields beyond those shown above.
+4. Output ONLY the JSON object, no markdown, no explanation.
+"""
 
-10. MISSING ACTIONS — Things that SHOULD exist based on the POLICY blocks
-    but are absent from project documents.  Reference policy filename + section.
+_PHASE4_SUMMARY_PROMPT = """\
+You are an executive summarizer. You are given a COMPRESSED digest of \
+extraction results from multiple analysis phases: per-document findings, \
+cross-document conflicts, repeated statements, policy gaps, and missing \
+actions/questions.  The digest highlights all critical signals.
 
-11. MISSING QUESTIONS — Questions the project SHOULD be asking based on
-    policies but isn't.  Reference policy filename + section.
+Output a JSON object with this EXACT key:
 
-CRITICAL RULES:
-- EVERY Fact, Decision, Assumption, Risk, OpenQuestion, and ActionItem MUST
-  include 'source_document' (match the [DOCUMENT: ...] header) and
-  'source_section' (match the [SECTION: ...] header).  Never leave them empty.
-- DocumentConflict uses document_a/document_b and section_a/section_b.
-- MissingAction and MissingQuestion use policy_reference and policy_section.
-- Be thorough — extract too many items rather than miss something.
-- Output ONLY valid JSON matching the schema exactly.  Every array field must
-  be present, even if empty ([]).
+{
+  "summary": "<your executive summary text covering document types, key themes, cross-cutting concerns, and most critical risks and gaps>"
+}
+
+ABSOLUTE RULES:
+1. The output object has exactly ONE key: "summary".
+2. Output ONLY the JSON object, no markdown, no explanation.
 """
 
 
@@ -172,7 +289,12 @@ async def _build_tools(
     db: AsyncSession,
     project_doc_ids: list[UUID],
 ) -> list:
-    """Build two LangChain @tools as closures capturing db + doc_ids."""
+    """Build two native async LangChain @tools as closures capturing db + doc_ids.
+
+    ── Both tools are now `async def`.  They `await` the database
+       directly instead of wrapping work in `asyncio.run()`, which caused nested
+       event-loop errors when the agent was invoked from an async context.
+    """
     from langchain_core.tools import tool
 
     # Fetch document filename→id mapping directly (we're in the main event loop)
@@ -182,7 +304,7 @@ async def _build_tools(
     doc_map = {d.filename: d.id for d in result.scalars().all()}
 
     @tool
-    def retrieve_document_chunks(filename: str) -> str:
+    async def retrieve_document_chunks(filename: str) -> str:
         """Retrieve the full text content of a project document by its filename.
 
         Args:
@@ -196,9 +318,9 @@ async def _build_tools(
         doc_id = doc_map.get(filename)
         if doc_id is None:
             available = list(doc_map.keys())
-            return f"ERROR: Document '{filename}' not found. " f"Available: {available}"
+            return f"ERROR: Document '{filename}' not found. Available: {available}"
 
-        async def _fetch():
+        try:
             chunks_result = await db.execute(
                 select(DocumentChunk)
                 .where(DocumentChunk.document_id == doc_id)
@@ -210,14 +332,11 @@ async def _build_tools(
                 section = _format_section_label(chunk.chunk_index, chunk.metadata_json)
                 parts.append(f"[SECTION: {section}]\n{chunk.content}\n")
             return "\n".join(parts)
-
-        try:
-            return asyncio.run(_fetch())
         except Exception as exc:
             return f"ERROR retrieving document '{filename}': {exc}"
 
     @tool
-    def search_policy_kb(query: str) -> str:
+    async def search_policy_kb(query: str) -> str:
         """Search the organizational policy knowledge base.
 
         Use AFTER reading project documents to find policies relevant to
@@ -230,8 +349,7 @@ async def _build_tools(
         Returns:
             Policy document chunks with [POLICY: ...] [SECTION: ...] labels.
         """
-
-        async def _search():
+        try:
             hits = await _search_policy_chunks(
                 db, query, project_doc_ids, settings.EXTRACTION_POLICY_TOP_K
             )
@@ -242,13 +360,10 @@ async def _build_tools(
                 section = _format_section_label(idx, meta)
                 parts.append(f"[POLICY: {filename}] [SECTION: {section}]\n{content}\n")
             return "\n".join(parts)
-
-        try:
-            return asyncio.run(_search())
         except Exception as exc:
             return f"ERROR searching policy KB for '{query}': {exc}"
 
-    logger.info("Built 2 tools for agent: %d document(s)", len(doc_map))
+    logger.info("Built 2 async tools for agent: %d document(s)", len(doc_map))
     return [retrieve_document_chunks, search_policy_kb]
 
 
@@ -257,8 +372,15 @@ async def _build_tools(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def _run_agent(doc_names: list[str], tools: list) -> dict:
-    """Create and invoke a LangGraph ReAct agent with the given tools."""
+# ── _run_agent is now `async def` and uses `agent.ainvoke()` ──
+
+
+async def _run_agent(doc_names: list[str], tools: list) -> dict:
+    """Create and invoke a LangGraph ReAct agent with the given async tools.
+
+    Uses native async invocation (ainvoke) so tool calls can `await` the
+    database directly without nested event loops.
+    """
     from langgraph.prebuilt import create_react_agent
 
     llm = _build_llm()
@@ -274,8 +396,8 @@ def _run_agent(doc_names: list[str], tools: list) -> dict:
         "Invoking LangGraph agent (max %d iterations)", settings.AGENT_MAX_ITERATIONS
     )
 
-    # Invoke with a recursion limit to cap iterations
-    result = agent.invoke(
+    # Native async invocation — tools are async, model is async
+    result = await agent.ainvoke(
         {"messages": [HumanMessage(content=user_input)]},
         config={"recursion_limit": settings.AGENT_MAX_ITERATIONS},
     )
@@ -298,7 +420,9 @@ def _run_agent(doc_names: list[str], tools: list) -> dict:
                 elif tool_name == "search_policy_kb":
                     policy_outputs.append((tool_input.get("query", "unknown"), output))
 
-    # Extract the final AI summary text (last AIMessage without tool_calls)
+    # ── Agent final output is now a terse "EXPLORATION COMPLETE"
+    #    signal + topic list, not a redundant narrative summary.  We still
+    #    capture it for logging but it is not consumed downstream. ──
     final_output = ""
     for msg in reversed(messages):
         if isinstance(msg, AIMessage) and not msg.tool_calls and msg.content:
@@ -330,49 +454,232 @@ def _find_tool_output(messages: list, start_idx: int, tool_call_id: str | None) 
 
 
 def _build_agent_input(doc_names: list[str]) -> str:
-    """Build the initial task description for the agent."""
+    """Build the initial task description for the agent.
+
+    ── No longer instructs the agent to "produce a summary" —
+       the system prompt handles the completion signal. ──
+    """
     names_str = "\n".join(f"  - {n}" for n in doc_names)
     return (
         f"Analyse the following project document(s):\n{names_str}\n\n"
         f"Call retrieve_document_chunks() for each document, then use "
         f"search_policy_kb() to find relevant organizational policies "
-        f"based on what you discover.  When finished, produce a summary "
-        f"of what you found."
+        f"based on what you discover."
     )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  Context Compiler
+#  4-Phase Structured Extraction Pipeline
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-async def _compile_context(
-    db: AsyncSession,
-    project_doc_ids: list[UUID],
-    agent_result: dict,
-) -> str:
-    """Compile context from agent tool outputs + fresh DB reads."""
-    parts: list[str] = []
-
-    doc_data = await _fetch_document_data(db, project_doc_ids)
-    for filename, chunks in doc_data:
-        parts.append(f"[DOCUMENT: {filename}]")
-        for content, section_label in chunks:
-            parts.append(f"[SECTION: {section_label}]\n{content}\n")
-        parts.append("")
-
+def _extract_policy_lines(agent_result: dict) -> list[str]:
+    """Extract unique policy reference lines from agent tool outputs."""
     seen: set[str] = set()
+    lines: list[str] = []
     for _, output in agent_result.get("policy_outputs", []):
         for line in output.split("\n"):
             line = line.strip()
             if line.startswith("[POLICY:") and "[SECTION:" in line:
                 if line not in seen:
                     seen.add(line)
-                    parts.append(line)
+                    lines.append(line)
+    return lines
 
-    context = "\n".join(parts)
-    logger.info("Compiled context: %d chars", len(context))
-    return context
+
+def _format_doc_context(filename: str, chunks: list[tuple[str, str]]) -> str:
+    """Format a single document's chunks into a labeled context string."""
+    parts = [f"[DOCUMENT: {filename}]"]
+    for content, section_label in chunks:
+        parts.append(f"[SECTION: {section_label}]\n{content}\n")
+    return "\n".join(parts)
+
+
+def _run_structured_pipeline(
+    doc_data: list[tuple[str, list[tuple[str, str]]]],
+    policy_lines: list[str],
+) -> ExtractionResult:
+    """Run 4 narrow LLM calls instead of 1 giant one to avoid output truncation.
+
+    Phase 1: Per-document extraction (parallel-safe, each call sees 1 doc).
+    Phase 2: Cross-document conflicts & repeated statements (reads Phase 1 JSON).
+    Phase 3: Policy gap analysis (reads Phase 1 JSON + policy chunks).
+    Phase 4: Executive summary (reads COMPRESSED digest of Phases 1-3).
+    """
+    import json
+
+    # ── Phase 1: Per-document extraction ──
+    phase1_results: list[PerDocumentExtraction] = []
+    # ── Build doc_inventory for the compression step ──
+    doc_inventory: list[tuple[str, str]] = []  # (filename, document_type)
+
+    for filename, chunks in doc_data:
+        doc_context = _format_doc_context(filename, chunks)
+        result = _invoke_structured(
+            _PHASE1_PER_DOC_PROMPT, doc_context, PerDocumentExtraction
+        )
+        phase1_results.append(result)
+        doc_inventory.append((filename, result.document_type))
+
+    # ── Phase 2: Cross-document conflict detection ──
+    phase1_json = json.dumps([r.model_dump() for r in phase1_results], indent=2)
+    conflicts = _invoke_structured(
+        _PHASE2_CONFLICT_PROMPT, phase1_json, ConflictDetectionResult
+    )
+
+    # ── Phase 3: Policy gap analysis ──
+    policy_context = phase1_json
+    if policy_lines:
+        policy_context += "\n\n=== RELEVANT POLICIES ===\n" + "\n".join(policy_lines)
+    gaps = _invoke_structured(
+        _PHASE3_POLICY_GAP_PROMPT, policy_context, PolicyGapResult
+    )
+
+    # ── Compress Phases 1-3 before Phase 4 ──────────────────────
+    # Instead of dumping the full raw JSON (which can easily exceed 10K tokens
+    # and cause "lost in the middle" dilution), we produce a plain-text digest
+    # that surfaces ALL signals (document inventory, every risk, every conflict,
+    # every missing action/question) — no arbitrary top-N truncation.
+    compressed_context = _compress_phase_results(
+        doc_inventory, phase1_results, conflicts, gaps
+    )
+    logger.debug(
+        "Phase 4 context compressed: %d chars (was ~%d chars raw JSON)",
+        len(compressed_context),
+        len(
+            json.dumps(
+                {
+                    "phase1_per_document": [r.model_dump() for r in phase1_results],
+                    "phase2_conflicts": conflicts.model_dump(),
+                    "phase3_policy_gaps": gaps.model_dump(),
+                },
+                indent=2,
+            )
+        ),
+    )
+
+    # ── Phase 4: Executive summary (reads compressed digest) ──
+    summary_result = _invoke_structured(
+        _PHASE4_SUMMARY_PROMPT, compressed_context, SummaryResult
+    )
+
+    # ── Assemble ──
+    return ExtractionResult(
+        summary=summary_result.summary,
+        facts=[f for r in phase1_results for f in r.facts],
+        decisions=[d for r in phase1_results for d in r.decisions],
+        assumptions=[a for r in phase1_results for a in r.assumptions],
+        risks=[risk for r in phase1_results for risk in r.risks],
+        open_questions=[q for r in phase1_results for q in r.open_questions],
+        action_items=[a for r in phase1_results for a in r.action_items],
+        document_conflicts=conflicts.conflicts,
+        repeated_statements=conflicts.repeated_statements,
+        missing_actions=gaps.missing_actions,
+        missing_questions=gaps.missing_questions,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Phase 4 Compression (CHANGE 2)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _compress_phase_results(
+    doc_inventory: list[tuple[str, str]],
+    phase1_results: list[PerDocumentExtraction],
+    conflicts: ConflictDetectionResult,
+    gaps: PolicyGapResult,
+) -> str:
+    """Compress multi-phase extraction results into a concise digest for Phase 4.
+
+    Without this step, the full JSON dump of Phases 1-3 can exceed 10K tokens,
+    causing the LLM to suffer "lost in the middle" context dilution.  This
+    function surfaces ALL signals in a compact plain-text format:
+      - Document inventory (filename + type)
+      - Aggregate extraction stats
+      - Every risk (all severities, sorted critical→low)
+      - Every cross-document conflict
+      - Every missing action (all urgencies, sorted critical→low)
+      - Every missing question (all urgencies, sorted critical→low)
+
+    Returns a plain-text digest, keeping Phase 4 focused on synthesis.
+    """
+    severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+
+    parts: list[str] = []
+
+    # ── Document inventory ──
+    parts.append("=== DOCUMENT INVENTORY ===")
+    for filename, doc_type in doc_inventory:
+        parts.append(f"  - {filename}: {doc_type}")
+
+    # ── Aggregate stats ──
+    total_facts = sum(len(r.facts) for r in phase1_results)
+    total_decisions = sum(len(r.decisions) for r in phase1_results)
+    total_risks = sum(len(r.risks) for r in phase1_results)
+    total_assumptions = sum(len(r.assumptions) for r in phase1_results)
+    total_open_q = sum(len(r.open_questions) for r in phase1_results)
+    total_actions = sum(len(r.action_items) for r in phase1_results)
+
+    parts.append("\n=== EXTRACTION STATS ===")
+    parts.append(
+        f"  Facts: {total_facts}, Decisions: {total_decisions}, "
+        f"Risks: {total_risks}, Assumptions: {total_assumptions}"
+    )
+    parts.append(f"  Open Questions: {total_open_q}, " f"Action Items: {total_actions}")
+
+    # ── All risks (all severities, sorted critical→low) ──
+    all_risks = [
+        (r, severity_order.get(r.severity, 99)) for p in phase1_results for r in p.risks
+    ]
+    all_risks.sort(key=lambda x: x[1])
+    if all_risks:
+        parts.append(f"\n=== RISKS ({len(all_risks)} total) ===")
+        for r, _ in all_risks:
+            parts.append(
+                f"  [{r.severity.upper()}] {r.content[:200]} "
+                f"(source: {r.source_document}, {r.source_section})"
+            )
+
+    # ── All conflicts ──
+    if conflicts.conflicts:
+        parts.append(
+            f"\n=== CROSS-DOCUMENT CONFLICTS " f"({len(conflicts.conflicts)} total) ==="
+        )
+        for c in conflicts.conflicts:
+            parts.append(
+                f"  - {c.document_a} vs {c.document_b}: " f"{c.statement_a[:150]}..."
+            )
+            if c.resolution_suggestion:
+                parts.append(f"    Resolution: {c.resolution_suggestion[:150]}")
+
+    # ── All missing actions (all urgencies, sorted critical→low) ──
+    sorted_actions = sorted(
+        gaps.missing_actions,
+        key=lambda a: severity_order.get(a.urgency, 99),
+    )
+    if sorted_actions:
+        parts.append(f"\n=== MISSING ACTIONS " f"({len(sorted_actions)} total) ===")
+        for a in sorted_actions:
+            parts.append(
+                f"  [{a.urgency.upper()}] {a.description[:200]} "
+                f"(policy: {a.policy_reference})"
+            )
+
+    # ── All missing questions (all urgencies, sorted critical→low) ──
+    sorted_questions = sorted(
+        gaps.missing_questions,
+        key=lambda q: severity_order.get(q.urgency, 99),
+    )
+    if sorted_questions:
+        parts.append(f"\n=== MISSING QUESTIONS " f"({len(sorted_questions)} total) ===")
+        for q in sorted_questions:
+            parts.append(
+                f"  [{q.urgency.upper()}] {q.question[:200]} "
+                f"(policy: {q.policy_reference})"
+            )
+
+    return "\n".join(parts)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -381,14 +688,16 @@ async def _compile_context(
 
 
 def _build_llm():
-    """Create a fresh ChatGroq instance with project settings."""
-    from langchain_groq import ChatGroq
+    """Create a fresh ChatOllama instance with project settings."""
+    from langchain_ollama import ChatOllama
 
-    return ChatGroq(
-        model=settings.GROQ_MODEL,
+    return ChatOllama(
+        model=settings.OLLAMA_MODEL,
         temperature=0,
-        api_key=settings.GROQ_API_KEY,
-        max_tokens=settings.GROQ_MAX_TOKENS,
+        base_url=settings.OLLAMA_BASE_URL,
+        num_ctx=settings.OLLAMA_NUM_CTX,
+        num_predict=settings.OLLAMA_NUM_PREDICT,
+        timeout=300.0,
     )
 
 
@@ -397,28 +706,42 @@ def _invoke_structured(
     context: str,
     schema: type,
 ):
-    """Invoke ChatOllama with structured output bound to *schema*."""
-    from langchain_core.prompts import ChatPromptTemplate
+    """Invoke the LLM with Ollama's native JSON schema mode.
 
-    llm = _build_llm()
-    structured_llm = llm.with_structured_output(schema, method="json_schema")
-    prompt = ChatPromptTemplate.from_messages(
-        [("system", system_prompt), ("human", "{context}")]
+    with_structured_output() constrains token sampling to produce only
+    valid JSON matching the Pydantic schema exactly — wrong field names,
+    single-quotes, unterminated strings, and extra keys are all impossible.
+    The return value is a fully validated Pydantic instance, no post-hoc
+    parsing or synonym mapping needed.
+    """
+    from langchain_ollama import ChatOllama
+
+    llm = ChatOllama(
+        model=settings.OLLAMA_MODEL,
+        temperature=0,
+        base_url=settings.OLLAMA_BASE_URL,
+        num_ctx=settings.OLLAMA_NUM_CTX,
+        num_predict=settings.OLLAMA_NUM_PREDICT,
     )
-    chain = prompt | structured_llm
+    structured_llm = llm.with_structured_output(schema, method="json_schema")
 
     schema_name = schema.__name__
     logger.debug("Invoking %s (context=%d chars)", schema_name, len(context))
     try:
-        result = chain.invoke({"context": context})
+        result = structured_llm.invoke(
+            [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=context),
+            ]
+        )
         logger.debug("%s complete", schema_name)
         return result
     except Exception as exc:
         logger.exception("%s failed", schema_name)
         raise RuntimeError(
             f"LLM call failed during {schema_name}: {exc}. "
-            f"Check that your GROQ_API_KEY is set and the model "
-            f"'{settings.GROQ_MODEL}' is accessible."
+            f"Check that Ollama is running and the model "
+            f"'{settings.OLLAMA_MODEL}' is pulled."
         ) from exc
 
 

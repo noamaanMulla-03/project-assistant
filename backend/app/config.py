@@ -54,12 +54,13 @@ class Settings(BaseSettings):
     INGESTION_TIMEOUT_SECONDS: int = 600  # 10 min — covers first-run model download
 
     # ── LLM / Extraction ───────────────────────────────────────────────
-    GROQ_API_KEY: str = ""  # required — get from https://console.groq.com/keys
-    GROQ_MODEL: str = "qwen-qwq-32b"  # Groq-hosted Qwen for function-calling
-    GROQ_MAX_TOKENS: int = 8192  # final structured output can be large
-    EXTRACTION_CHUNKS_PER_DOC: int = 15  # max chunks per tool call
-    EXTRACTION_POLICY_TOP_K: int = 10  # max policy chunks per search
-    AGENT_MAX_ITERATIONS: int = 8  # max tool-calling rounds before forced stop
+    OLLAMA_BASE_URL: str = "http://localhost:11434"
+    OLLAMA_MODEL: str = "gpt-oss:120b-cloud"  # Ollama Cloud — remote inference, zero local load
+    OLLAMA_NUM_CTX: int = 65536  # cloud GPUs handle large context windows
+    OLLAMA_NUM_PREDICT: int = 16384
+    EXTRACTION_CHUNKS_PER_DOC: int = 12  # max chunks per tool call
+    EXTRACTION_POLICY_TOP_K: int = 8  # max policy chunks per search
+    AGENT_MAX_ITERATIONS: int = 10  # max tool-calling rounds before forced stop
 
 
 # Singleton instance — import this everywhere
