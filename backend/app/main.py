@@ -3,6 +3,7 @@
 
 # Fix passlib 1.7.4 compatibility with bcrypt >=4.0.0
 import bcrypt
+
 if not hasattr(bcrypt, "__about__"):
     setattr(
         bcrypt,
@@ -49,6 +50,33 @@ async def lifespan(app: FastAPI):
             logging.getLogger(__name__).warning(
                 "FAISS index build skipped — table may not exist yet."
             )
+
+        # ── Recover orphaned documents ──
+        # If the container restarted while ingestion was in progress, those
+        # documents will be stuck with status='processing' because the
+        # asyncio.create_task that was responsible for them no longer exists.
+        # Reset any such rows to 'error' so the frontend reflects reality.
+        try:
+            from sqlalchemy import update
+            from app.models.knowledge import KnowledgeDocument
+
+            result = await db.execute(
+                update(KnowledgeDocument)
+                .where(KnowledgeDocument.status == "processing")
+                .values(status="error")
+            )
+            orphan_count = result.rowcount
+            if orphan_count:
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "Recovered %d orphaned document(s): status reset from "
+                    "'processing' to 'error' (ingestion task lost on restart).",
+                    orphan_count,
+                )
+            await db.commit()
+        except Exception:
+            pass
 
     yield
 

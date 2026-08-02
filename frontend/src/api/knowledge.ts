@@ -127,3 +127,11 @@ export async function fetchDocumentText(id: string): Promise<DocumentText> {
 	);
 	return data;
 }
+
+/** Retry ingestion for a document that previously failed (status='error'). */
+export async function reingestDocument(id: string): Promise<KnowledgeDocument> {
+	const { data } = await apiClient.post<KnowledgeDocument>(
+		`/knowledge/documents/${id}/reingest`,
+	);
+	return data;
+}

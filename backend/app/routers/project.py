@@ -211,20 +211,27 @@ async def create_project(
 
     # Fire async ingestion for each document (same pattern as /knowledge/upload)
     import asyncio
-    from app.services.vectorization import ingest_document
+    from app.services.vectorization import ingest_document, _set_status_fresh
 
     async def _safe_ingest(doc: KnowledgeDocument, path: Path) -> None:
+        """Run ingestion in background.
+
+        Catches BaseException (not just Exception) because asyncio.CancelledError
+        is NOT a subclass of Exception in Python 3.9+.  Always updates the
+        document status so the frontend doesn't poll forever.
+        """
         try:
             await ingest_document(
                 doc_id=doc.id, file_path=path, file_type=doc.file_type
             )
-        except Exception:
+        except BaseException:
             import logging
 
             logging.getLogger(__name__).exception(
                 "Background ingestion failed for document %s",
                 doc.id,
             )
+            await _set_status_fresh(KnowledgeDocument, doc.id, "error")
 
     for d in doc_rows:
         asyncio.create_task(_safe_ingest(d, upload_dir / d.file_path))

@@ -11,7 +11,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -152,23 +152,29 @@ async def upload_document(
     # Using asyncio.create_task instead of BackgroundTasks because the latter
     # does not reliably await async coroutines in all FastAPI versions.
     import asyncio
-    from app.services.vectorization import ingest_document
+    from app.services.vectorization import ingest_document, _set_status_fresh
 
     async def _safe_ingest() -> None:
-        """Run ingestion in background, logging any failures."""
+        """Run ingestion in background.
+
+        Catches BaseException (not just Exception) because asyncio.CancelledError
+        is NOT a subclass of Exception in Python 3.9+.  Always updates the
+        document status so the frontend doesn't poll forever.
+        """
         try:
             await ingest_document(
                 doc_id=doc.id,
                 file_path=disk_path,
                 file_type=doc.file_type,
             )
-        except Exception:
+        except BaseException:
             import logging
 
             logging.getLogger(__name__).exception(
                 "Background ingestion failed for document %s",
                 doc.id,
             )
+            await _set_status_fresh(KnowledgeDocument, doc.id, "error")
 
     asyncio.create_task(_safe_ingest())
 
@@ -280,6 +286,80 @@ async def delete_document(
 
     await db.delete(doc)
     return MessageResponse(message=f"Document '{doc.filename}' deleted.")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  POST /knowledge/documents/{document_id}/reingest
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@router.post(
+    "/documents/{document_id}/reingest",
+    response_model=KnowledgeDocumentResponse,
+    summary="Retry ingestion for a document that previously failed",
+)
+async def reingest_document(
+    document_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Re-run the full ingestion pipeline for a document whose previous
+    ingestion failed (status='error') or was cancelled.
+
+    Deletes any stale chunks from the previous attempt, removes stale FAISS
+    entries, resets the status to 'processing', and fires the ingestion
+    pipeline in the background.  The frontend can poll GET /documents until
+    the status changes to 'indexed' or 'error' again.
+    """
+    doc = await _get_doc_or_404(db, document_id, current_user.id)
+
+    # Verify the source file still exists on disk
+    disk_path = _resolve_upload_path() / doc.file_path
+    if not disk_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Source file not found on disk — re-upload the document instead.",
+        )
+
+    # ── Clear stale data from previous attempt ──
+    from app.services.faiss_service import get_faiss_service
+
+    faiss = get_faiss_service()
+    await faiss.remove_document(document_id, db)
+
+    # Delete existing chunks from pgvector (cascade would handle it, but
+    # explicit delete avoids any FK ordering issues with FAISS removed first)
+    await db.execute(
+        delete(DocumentChunk).where(DocumentChunk.document_id == document_id)
+    )
+
+    # ── Reset status and fire background ingestion ──
+    doc.status = "processing"
+    await db.flush()
+    await db.commit()
+
+    import asyncio
+    from app.services.vectorization import ingest_document, _set_status_fresh
+
+    async def _safe_ingest() -> None:
+        try:
+            await ingest_document(
+                doc_id=doc.id,
+                file_path=disk_path,
+                file_type=doc.file_type,
+            )
+        except BaseException:
+            import logging
+
+            logging.getLogger(__name__).exception(
+                "Retry ingestion failed for document %s",
+                doc.id,
+            )
+            await _set_status_fresh(KnowledgeDocument, doc.id, "error")
+
+    asyncio.create_task(_safe_ingest())
+
+    return _doc_to_response(doc)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

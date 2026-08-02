@@ -16,6 +16,7 @@ import {
     getDocuments,
     isAllowedFile,
     mimeToLabel,
+    reingestDocument,
     uploadDocument,
     type KnowledgeDocument,
 } from "../api/knowledge";
@@ -174,6 +175,26 @@ function AlertIcon({ className }: { className?: string }) {
     );
 }
 
+function RefreshCwIcon({ className }: { className?: string }) {
+    return (
+        <svg
+            className={className}
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+        >
+            <polyline points="23,4 23,10 17,10" />
+            <polyline points="1,20 1,14 7,14" />
+            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+        </svg>
+    );
+}
+
 // ── File type colour map ─────────────────────────────────────────────────────
 
 const FILE_COLORS: Record<string, string> = {
@@ -255,6 +276,24 @@ export default function Knowledge() {
                 setError(msg);
             } finally {
                 setIsUploading(false);
+            }
+        },
+        [],
+    );
+
+    // ── Retry handler ─────────────────────────────────────────────────────
+    const handleRetry = useCallback(
+        async (doc: KnowledgeDocument) => {
+            try {
+                const updated = await reingestDocument(doc.id);
+                // Replace the document with the fresh one (status='processing')
+                setDocuments((prev) =>
+                    prev.map((d) => (d.id === doc.id ? updated : d)),
+                );
+            } catch (err: unknown) {
+                const msg =
+                    err instanceof Error ? err.message : "Retry failed.";
+                setError(msg);
             }
         },
         [],
@@ -534,15 +573,28 @@ export default function Knowledge() {
 
                                         {/* Actions */}
                                         <div className="flex gap-2">
-                                            <button
-                                                onClick={() =>
-                                                    handleDownload(doc)
-                                                }
-                                                className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-surface-300 px-3 py-2 text-xs font-medium text-surface-700 transition-colors hover:border-surface-700 hover:bg-surface-100 dark:border-surface-dark-700 dark:text-surface-dark-300 dark:hover:border-surface-dark-200 dark:hover:bg-surface-dark-800"
-                                            >
-                                                <DownloadIcon />
-                                                Download
-                                            </button>
+                                            {doc.status === "error" && (
+                                                <button
+                                                    onClick={() =>
+                                                        handleRetry(doc)
+                                                    }
+                                                    className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700 transition-colors hover:bg-amber-100 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-400 dark:hover:bg-amber-950/50"
+                                                >
+                                                    <RefreshCwIcon />
+                                                    Retry
+                                                </button>
+                                            )}
+                                            {doc.status !== "error" && (
+                                                <button
+                                                    onClick={() =>
+                                                        handleDownload(doc)
+                                                    }
+                                                    className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-surface-300 px-3 py-2 text-xs font-medium text-surface-700 transition-colors hover:border-surface-700 hover:bg-surface-100 dark:border-surface-dark-700 dark:text-surface-dark-300 dark:hover:border-surface-dark-200 dark:hover:bg-surface-dark-800"
+                                                >
+                                                    <DownloadIcon />
+                                                    Download
+                                                </button>
+                                            )}
                                             <button
                                                 onClick={() =>
                                                     handleDelete(doc)
