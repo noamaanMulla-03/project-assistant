@@ -394,7 +394,7 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
                         {(projects ?? []).map((p) => (
                             <NavLink
                                 key={p.id}
-                                to={`/project/${p.id}`}
+                                to={`/project/${p.id}${p.analysis_result ? "/results" : ""}`}
                                 className={({ isActive }) =>
                                     cn(
                                         "flex items-center gap-2 rounded-lg px-2 py-1.5 text-xs transition-colors",

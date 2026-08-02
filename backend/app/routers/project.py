@@ -108,6 +108,7 @@ def _project_to_response(
         documents=docs,
         created_at=project.created_at,
         created_by_name=project.creator.full_name if project.creator else None,
+        analysis_result=project.analysis_result,
     )
 
 
@@ -421,19 +422,21 @@ async def remove_project_document(
 )
 async def analyze_project(
     project_id: uuid.UUID,
+    force: bool = False,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Analyze up to three project documents using the LangChain/Ollama pipeline.
+
+    If a cached analysis_result exists and ``force`` is False, returns the
+    cached result immediately without running the LLM.  Pass ``?force=true``
+    to re-run the full pipeline (the "Redo Analysis" button).
 
     Retrieves pre-vectorized document chunks from pgvector, searches for
     relevant organizational policy chunks via FAISS, then runs a local LLM
     (Qwen3 7B via Ollama) to extract facts, decisions, assumptions, risks,
     open questions, action items, cross-document conflicts, and policy-gap
     missing actions.
-
-    All extracted items carry ``source_document`` and ``source_section``
-    metadata so the frontend can highlight the originating text inline.
 
     Returns 409 if any project document is still indexing.  Returns 502 if
     the LLM is unreachable or fails.
@@ -454,7 +457,11 @@ async def analyze_project(
             detail="You do not have permission to analyse this project.",
         )
 
-    # 2. Verify all documents have finished ingestion
+    # 2. Return cached result if available and force is not set
+    if not force and project.analysis_result is not None:
+        return ExtractionResult(**project.analysis_result)
+
+    # 3. Verify all documents have finished ingestion
     doc_refs = await _resolve_documents(db, project.document_ids)
     unindexed = [d for d in doc_refs if d.status != "indexed"]
     if unindexed:
@@ -467,7 +474,7 @@ async def analyze_project(
             ),
         )
 
-    # 3. Run the 4-phase extraction pipeline (orchestrated internally)
+    # 4. Run the 4-phase extraction pipeline (orchestrated internally)
     from app.services.extraction import run_extraction
 
     try:
@@ -477,5 +484,9 @@ async def analyze_project(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=str(exc),
         )
+
+    # 5. Cache the result in the DB so subsequent loads skip the LLM
+    project.analysis_result = extraction_result.model_dump()
+    await db.flush()
 
     return extraction_result

@@ -4,13 +4,17 @@
 # stores their IDs in a PostgreSQL ARRAY(UUID) column rather than a foreign
 # key on KnowledgeDocument, so the same document can belong to multiple
 # projects in the future without model changes.
+#
+# The analysis_result JSONB column caches the full ExtractionResult so
+# reopening a project from the sidebar loads instantly without re-running
+# the LLM pipeline.
 
 import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 from sqlalchemy import DateTime, ForeignKey, String, func
-from sqlalchemy.dialects.postgresql import ARRAY, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -47,6 +51,14 @@ class Project(Base):
         default="indexing",
         server_default="indexing",
         comment="Aggregate ingestion status: 'indexing' | 'ready' | 'error'",
+    )
+    # Cached AI extraction result — NULL until the first analysis completes.
+    # Stored as JSONB so it can be returned inline on GET /projects/{id}.
+    analysis_result: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB,
+        nullable=True,
+        default=None,
+        comment="Cached ExtractionResult JSON from POST /projects/{id}/analyze",
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

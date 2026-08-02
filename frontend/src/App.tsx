@@ -16,6 +16,7 @@ import Dashboard from "./pages/Dashboard";
 import Knowledge from "./pages/Knowledge";
 import ProjectNew from "./pages/ProjectNew";
 import ProjectResults from "./pages/ProjectResults";
+import ProjectReview from "./pages/ProjectReview";
 
 export default function App() {
     return (
@@ -34,6 +35,7 @@ export default function App() {
                     <Route path="/project/new" element={<ProjectNew />} />
                     <Route path="/project/:id" element={<ProjectNew />} />
                     <Route path="/project/:id/results" element={<ProjectResults />} />
+                    <Route path="/project/:id/review" element={<ProjectReview />} />
                 </Route>
             </Route>
 

@@ -3,6 +3,7 @@
 # Follows the same conventions as schemas/knowledge.py.
 
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -34,6 +35,8 @@ class ProjectResponse(BaseModel):
     documents: list[ProjectDocumentRef]
     created_at: datetime
     created_by_name: str | None  # full_name of creator, null if user deleted
+    # Cached AI extraction result — None until the first analysis completes
+    analysis_result: dict[str, Any] | None = None
 
     model_config = {"from_attributes": True}
 
@@ -43,3 +46,4 @@ class ProjectListResponse(BaseModel):
 
     projects: list[ProjectResponse]
     total: int
+

@@ -11,6 +11,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { GlowingEffectCard } from "../components/ui/glowing-effect";
 import { cn } from "../components/utils";
 import { analyzeProject, createProject, getProject, removeProjectDocument, type ProjectDocumentRef, type ProjectResponse } from "../api/project";
+import ProjectNavbar from "../components/ProjectNavbar";
 import {
     ALLOWED_EXTENSIONS_LABEL,
     formatBytes,
@@ -385,120 +386,125 @@ export default function ProjectNew() {
     }));
 
     return (
-        <div className="px-4 py-12">
-            <div className="mx-auto max-w-5xl">
-                {/* ── Header ─────────────────────────────────────────────── */}
-                <div className="mb-8">
-                    <h1 className="text-2xl font-semibold text-surface-800 dark:text-surface-dark-100">
-                        New Project
-                    </h1>
-                    <p className="mt-1 text-sm text-surface-700 dark:text-surface-dark-300">
-                        Upload 1-3 project documents (meeting notes, requirements, decision records, etc.)
-                        for AI analysis. Supported: {ALLOWED_EXTENSIONS_LABEL}.
-                    </p>
-                </div>
-
-                {/* ── Upload Slots ──────────────────────────────────────── */}
-                <div className="mb-8 grid grid-cols-1 gap-6 md:grid-cols-3">
-                    {slots.map((slot) => (
-                        <UploadSlot
-                            key={slot.index}
-                            index={slot.index}
-                            file={slot.file}
-                            docRef={slot.docRef}
-                            onSelect={(f) => handleFileSelect(slot.index, f)}
-                            onRemove={() => handleFileRemove(slot.index)}
-                            disabled={!!project}
-                        />
-                    ))}
-                </div>
-
-                {/* ── Error Banner ──────────────────────────────────────── */}
-                {error && (
-                    <div className="mb-6 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700 dark:border-red-800 dark:bg-red-950/30 dark:text-red-400">
-                        {error}
-                        <button
-                            type="button"
-                            onClick={() => setError(null)}
-                            className="ml-3 font-medium underline hover:no-underline"
-                        >
-                            Dismiss
-                        </button>
-                    </div>
-                )}
-
-                {/* ── Action Bar ────────────────────────────────────────── */}
-                <div className="flex flex-col items-center gap-3">
-                    {!project && (
-                        <button
-                            type="button"
-                            onClick={handleUpload}
-                            disabled={!canUpload}
-                            className={cn(
-                                "inline-flex items-center gap-2 rounded-xl px-8 py-3 text-sm font-semibold transition-all",
-                                canUpload
-                                    ? "bg-indigo-600 text-white hover:bg-indigo-700 shadow-lg shadow-indigo-500/25 active:scale-[0.98]"
-                                    : "cursor-not-allowed bg-surface-200 text-surface-400 dark:bg-surface-dark-800 dark:text-surface-dark-500",
-                            )}
-                        >
-                            {isUploading ? (
-                                <>
-                                    <Spinner /> Uploading...
-                                </>
-                            ) : (
-                                <>
-                                    <ArrowRightIcon /> Upload Documents
-                                </>
-                            )}
-                        </button>
-                    )}
-
-                    {project && (
-                        <button
-                            type="button"
-                            onClick={handleAnalyze}
-                            disabled={!isReady || isAnalyzing}
-                            className={cn(
-                                "inline-flex items-center gap-2 rounded-xl px-8 py-3 text-sm font-semibold transition-all",
-                                isReady && !isAnalyzing
-                                    ? "bg-gradient-to-r from-indigo-600 to-violet-600 text-white hover:from-indigo-700 hover:to-violet-700 shadow-lg shadow-indigo-500/25 active:scale-[0.98]"
-                                    : "cursor-not-allowed border-2 border-surface-300 bg-transparent text-surface-400 dark:border-surface-dark-700 dark:text-surface-dark-500",
-                            )}
-                        >
-                            {isAnalyzing ? (
-                                <>
-                                    <Spinner /> Analyzing...
-                                </>
-                            ) : isPolling ? (
-                                <>
-                                    <Spinner /> Indexing documents...
-                                </>
-                            ) : hasError ? (
-                                <>
-                                    <AlertTriangleIcon className="text-red-500" /> Indexing failed
-                                </>
-                            ) : (
-                                <>
-                                    Start Analysis <ArrowRightIcon />
-                                </>
-                            )}
-                        </button>
-                    )}
-
-                    {project && (
-                        <p className="text-xs text-surface-400 dark:text-surface-dark-500">
-                            {isAnalyzing
-                                ? "AI analysis in progress — this may take 20-40 seconds for large documents."
-                                : isPolling
-                                    ? "Documents are being processed. This may take a minute for large files."
-                                    : isReady
-                                        ? "All documents indexed — ready for AI analysis."
-                                        : hasError
-                                            ? "One or more documents failed to index. Remove the project and try again."
-                                            : ""
-                            }
+        <div className="flex h-full flex-col">
+            {project?.id && (
+                <ProjectNavbar projectId={project.id} hasAnalysis={!!project.analysis_result} />
+            )}
+            <div className="flex-1 overflow-y-auto px-4 py-12">
+                <div className="mx-auto max-w-5xl">
+                    {/* ── Header ─────────────────────────────────────────────── */}
+                    <div className="mb-8">
+                        <h1 className="text-2xl font-semibold text-surface-800 dark:text-surface-dark-100">
+                            New Project
+                        </h1>
+                        <p className="mt-1 text-sm text-surface-700 dark:text-surface-dark-300">
+                            Upload 1-3 project documents (meeting notes, requirements, decision records, etc.)
+                            for AI analysis. Supported: {ALLOWED_EXTENSIONS_LABEL}.
                         </p>
+                    </div>
+
+                    {/* ── Upload Slots ──────────────────────────────────────── */}
+                    <div className="mb-8 grid grid-cols-1 gap-6 md:grid-cols-3">
+                        {slots.map((slot) => (
+                            <UploadSlot
+                                key={slot.index}
+                                index={slot.index}
+                                file={slot.file}
+                                docRef={slot.docRef}
+                                onSelect={(f) => handleFileSelect(slot.index, f)}
+                                onRemove={() => handleFileRemove(slot.index)}
+                                disabled={!!project}
+                            />
+                        ))}
+                    </div>
+
+                    {/* ── Error Banner ──────────────────────────────────────── */}
+                    {error && (
+                        <div className="mb-6 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700 dark:border-red-800 dark:bg-red-950/30 dark:text-red-400">
+                            {error}
+                            <button
+                                type="button"
+                                onClick={() => setError(null)}
+                                className="ml-3 font-medium underline hover:no-underline"
+                            >
+                                Dismiss
+                            </button>
+                        </div>
                     )}
+
+                    {/* ── Action Bar ────────────────────────────────────────── */}
+                    <div className="flex flex-col items-center gap-3">
+                        {!project && (
+                            <button
+                                type="button"
+                                onClick={handleUpload}
+                                disabled={!canUpload}
+                                className={cn(
+                                    "inline-flex items-center gap-2 rounded-xl px-8 py-3 text-sm font-semibold transition-all",
+                                    canUpload
+                                        ? "bg-indigo-600 text-white hover:bg-indigo-700 shadow-lg shadow-indigo-500/25 active:scale-[0.98]"
+                                        : "cursor-not-allowed bg-surface-200 text-surface-400 dark:bg-surface-dark-800 dark:text-surface-dark-500",
+                                )}
+                            >
+                                {isUploading ? (
+                                    <>
+                                        <Spinner /> Uploading...
+                                    </>
+                                ) : (
+                                    <>
+                                        <ArrowRightIcon /> Upload Documents
+                                    </>
+                                )}
+                            </button>
+                        )}
+
+                        {project && (
+                            <button
+                                type="button"
+                                onClick={handleAnalyze}
+                                disabled={!isReady || isAnalyzing}
+                                className={cn(
+                                    "inline-flex items-center gap-2 rounded-xl px-8 py-3 text-sm font-semibold transition-all",
+                                    isReady && !isAnalyzing
+                                        ? "bg-gradient-to-r from-indigo-600 to-violet-600 text-white hover:from-indigo-700 hover:to-violet-700 shadow-lg shadow-indigo-500/25 active:scale-[0.98]"
+                                        : "cursor-not-allowed border-2 border-surface-300 bg-transparent text-surface-400 dark:border-surface-dark-700 dark:text-surface-dark-500",
+                                )}
+                            >
+                                {isAnalyzing ? (
+                                    <>
+                                        <Spinner /> Analyzing...
+                                    </>
+                                ) : isPolling ? (
+                                    <>
+                                        <Spinner /> Indexing documents...
+                                    </>
+                                ) : hasError ? (
+                                    <>
+                                        <AlertTriangleIcon className="text-red-500" /> Indexing failed
+                                    </>
+                                ) : (
+                                    <>
+                                        Start Analysis <ArrowRightIcon />
+                                    </>
+                                )}
+                            </button>
+                        )}
+
+                        {project && (
+                            <p className="text-xs text-surface-400 dark:text-surface-dark-500">
+                                {isAnalyzing
+                                    ? "AI analysis in progress — this may take 20-40 seconds for large documents."
+                                    : isPolling
+                                        ? "Documents are being processed. This may take a minute for large files."
+                                        : isReady
+                                            ? "All documents indexed — ready for AI analysis."
+                                            : hasError
+                                                ? "One or more documents failed to index. Remove the project and try again."
+                                                : ""
+                                }
+                            </p>
+                        )}
+                    </div>
                 </div>
             </div>
         </div>

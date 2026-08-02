@@ -20,6 +20,8 @@ export interface ProjectResponse {
 	documents: ProjectDocumentRef[];
 	created_at: string;
 	created_by_name: string | null;
+	// Cached AI extraction result — null until the first analysis completes
+	analysis_result: ExtractionResult | null;
 }
 
 export interface ProjectListResponse {
@@ -154,10 +156,13 @@ export async function listProjects(
 	return data;
 }
 
-/** Run AI extraction on a project's documents.  Returns the full structured payload. */
-export async function analyzeProject(id: string): Promise<ExtractionResult> {
+/** Run AI extraction on a project's documents.  Returns the full structured payload.
+ *  Pass force=true to re-run the pipeline even if a cached result exists. */
+export async function analyzeProject(id: string, force = false): Promise<ExtractionResult> {
 	const { data } = await apiClient.post<ExtractionResult>(
 		`/projects/${id}/analyze`,
+		null,
+		{ params: force ? { force: true } : undefined },
 	);
 	return data;
 }
