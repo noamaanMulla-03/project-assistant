@@ -27,7 +27,7 @@ export function getAccessToken(): string | null {
 // ── Axios instance ───────────────────────────────────────────────────────────
 
 const apiClient = axios.create({
-	baseURL: "/", // Vite proxy handles routing to backend
+	baseURL: import.meta.env.VITE_API_BASE_URL ?? "/", // Use Railway URL in prod; Vite proxy in dev
 	withCredentials: true, // Send httpOnly cookies (refresh token)
 	headers: { "Content-Type": "application/json" },
 });
