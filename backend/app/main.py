@@ -1,6 +1,15 @@
 # ── FastAPI Application Factory ───────────────────────────────────────────────
 # Creates and configures the ASGI app with CORS, routers, and lifespan events.
 
+# Fix passlib 1.7.4 compatibility with bcrypt >=4.0.0
+import bcrypt
+if not hasattr(bcrypt, "__about__"):
+    setattr(
+        bcrypt,
+        "__about__",
+        type("About", (), {"__version__": getattr(bcrypt, "__version__", "4.0.0")}),
+    )
+
 from pathlib import Path
 from contextlib import asynccontextmanager
 
