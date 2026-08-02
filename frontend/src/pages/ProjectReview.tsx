@@ -298,8 +298,9 @@ function FactCard({
                     <span className="truncate text-xs text-surface-700 dark:text-surface-dark-200">
                         {open ? item.content : truncated}
                     </span>
-                    <span className={cn("ml-auto shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium", CLASSIFICATION_COLORS[item.classification] ?? CLASSIFICATION_COLORS.fact)}>
-                        {item.classification}
+                    {/* Classification tag — capitalized, left-aligned */}
+                    <span className={cn("shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium", CLASSIFICATION_COLORS[item.classification] ?? CLASSIFICATION_COLORS.fact)}>
+                        {item.classification.charAt(0).toUpperCase() + item.classification.slice(1)}
                     </span>
                 </>
             }
@@ -364,21 +365,23 @@ function ConflictCard({
             onToggle={onToggle}
             header={
                 <>
+                    {/* Status dot — resolved = green, unresolved = red */}
                     <span className={cn("h-2 w-2 shrink-0 rounded-full", item.resolved ? "bg-emerald-400 dark:bg-emerald-500" : "bg-red-400 dark:bg-red-500")} />
                     <span className="truncate text-xs text-surface-700 dark:text-surface-dark-200">
                         {open ? item.statement_a : truncated}
                     </span>
+                    {/* Resolved/unresolved toggle button */}
                     <button
                         type="button"
                         onClick={(e) => { e.stopPropagation(); onUpdate(index, { resolved: !item.resolved }); }}
                         className={cn(
-                            "ml-auto shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors",
+                            "shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors",
                             item.resolved
                                 ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400"
                                 : "bg-red-100 text-red-700 dark:bg-red-950/30 dark:text-red-400",
                         )}
                     >
-                        {item.resolved ? "\u2713" : "!"}
+                        {item.resolved ? "Resolved \u2713" : "Unresolved"}
                     </button>
                 </>
             }
@@ -403,6 +406,25 @@ function ConflictCard({
                 onChange={(e) => onUpdate(index, { resolution_note: e.target.value })}
                 aria-label={`Resolution note for conflict ${index + 1}`}
             />
+            {/* Resolve button — marks conflict as resolved after filling the note */}
+            <div className="flex items-center gap-2">
+                <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); onUpdate(index, { resolved: true }); }}
+                    disabled={item.resolved}
+                    className={cn(
+                        "rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
+                        item.resolved
+                            ? "cursor-not-allowed bg-surface-100 text-surface-400 dark:bg-surface-dark-800 dark:text-surface-dark-500"
+                            : "bg-emerald-600 text-white hover:bg-emerald-700 dark:bg-emerald-500 dark:hover:bg-emerald-400 dark:text-white",
+                    )}
+                >
+                    {item.resolved ? "Resolved \u2713" : "Resolve Conflict"}
+                </button>
+                {!item.resolved && !item.resolution_note.trim() && (
+                    <span className="text-[10px] text-surface-400 dark:text-surface-dark-500">Add a resolution note above first</span>
+                )}
+            </div>
             {item.resolution_suggestion && (
                 <p className="rounded-md bg-surface-100 px-3 py-2 text-xs text-surface-500 dark:bg-surface-dark-800 dark:text-surface-dark-400">
                     💡 AI suggestion: {item.resolution_suggestion}
@@ -434,12 +456,6 @@ function ActionItemCard({
     onViewSource: (docId: string, docName: string, section: string) => void;
 }) {
     const truncated = item.edited_content.length > 70 ? item.edited_content.slice(0, 70) + "\u2026" : item.edited_content;
-    // Single 3-state cycle: pending -> approved -> rejected -> pending
-    const nextStatus: Record<ActionReviewItem["status"], ActionReviewItem["status"]> = {
-        pending: "approved",
-        approved: "rejected",
-        rejected: "pending",
-    };
     const statusDot: Record<ActionReviewItem["status"], string> = {
         pending: "bg-blue-400 dark:bg-blue-500",
         approved: "bg-emerald-400 dark:bg-emerald-500",
@@ -456,18 +472,18 @@ function ActionItemCard({
                     <span className={cn("truncate text-xs", item.status === "rejected" && "line-through opacity-60")}>
                         {open ? item.edited_content : truncated}
                     </span>
-                    {/* Single cycle button replaces the old two-button pattern */}
-                    <button
-                        type="button"
-                        onClick={(e) => { e.stopPropagation(); onUpdate(index, { status: nextStatus[item.status] }); }}
-                        className={cn(
-                            "ml-auto shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors",
-                            STATUS_COLORS[item.status],
-                        )}
-                        title={`Status: ${item.status} (click to cycle)`}
+                    {/* Dropdown for status — consistent with Facts tab */}
+                    <select
+                        className="shrink-0 rounded-md border border-surface-200 bg-surface-50 px-2 py-0.5 text-[10px] font-medium text-surface-700 focus:border-primary-400 focus:outline-none focus:ring-1 focus:ring-primary-400 dark:border-surface-dark-700 dark:bg-surface-dark-800 dark:text-surface-dark-200"
+                        value={item.status}
+                        onClick={(e) => e.stopPropagation()}
+                        onChange={(e) => { e.stopPropagation(); onUpdate(index, { status: e.target.value as ActionReviewItem["status"] }); }}
+                        aria-label="Action status"
                     >
-                        {item.status}
-                    </button>
+                        <option value="pending">Pending</option>
+                        <option value="approved">Approved</option>
+                        <option value="rejected">Rejected</option>
+                    </select>
                 </>
             }
         >
