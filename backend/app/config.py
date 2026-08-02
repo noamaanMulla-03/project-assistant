@@ -66,7 +66,7 @@ class Settings(BaseSettings):
     INGESTION_TIMEOUT_SECONDS: int = 600  # 10 min — covers first-run model download
 
     # ── LLM / Extraction ───────────────────────────────────────────────
-    OLLAMA_BASE_URL: str = "http://localhost:11434"
+    OLLAMA_BASE_URL: str = "https://api.ollama.com"
     OLLAMA_API_KEY: str = ""
     OLLAMA_MODEL: str = "gpt-oss:120b-cloud"  # Ollama Cloud — remote inference, zero local load
     OLLAMA_NUM_CTX: int = 65536  # cloud GPUs handle large context windows
