@@ -23,6 +23,7 @@ from app.config import settings
 from app.models.knowledge import DocumentChunk, KnowledgeDocument
 from app.schemas.extraction import (
     ConflictDetectionResult,
+    DocumentType,
     ExtractionResult,
     PerDocumentExtraction,
     PolicyGapResult,
@@ -125,7 +126,7 @@ JSON fields specified below.  The primary body text ALWAYS goes in \"content\".
 Output a JSON object with these EXACT top-level keys and sub-fields:
 
 {
-  "document_type": "<string>",
+  "document_type": "<one of: meeting_notes | requirement_draft | implementation_notes | project_update | decision_record, or a short custom label if none fit>",
   "facts": [
     {
       "content": "<the fact text — FIELD NAME IS content, NOT statement>",
@@ -565,6 +566,9 @@ def _run_structured_pipeline(
 
     # ── Assemble ──
     return ExtractionResult(
+        document_types=[
+            DocumentType(filename=fn, document_type=dt) for fn, dt in doc_inventory
+        ],
         summary=summary_result.summary,
         facts=[f for r in phase1_results for f in r.facts],
         decisions=[d for r in phase1_results for d in r.decisions],

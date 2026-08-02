@@ -298,6 +298,26 @@ class SummaryResult(BaseModel):
     model_config = {"extra": "forbid"}
 
 
+# ── Per-Document Type ────────────────────────────────────────────────────────
+
+
+class DocumentType(BaseModel):
+    """Identified type for a single project document."""
+
+    filename: str = Field(
+        ...,
+        description="Original filename of the document",
+    )
+    document_type: str = Field(
+        ...,
+        description=(
+            "Identified document type from the canonical taxonomy: "
+            "meeting_notes, requirement_draft, implementation_notes, "
+            "project_update, decision_record, or a custom short label"
+        ),
+    )
+
+
 # ── Root Extraction Result ───────────────────────────────────────────────────
 
 
@@ -315,6 +335,10 @@ class ExtractionResult(BaseModel):
     every array without null checks.
     """
 
+    document_types: list[DocumentType] = Field(
+        default_factory=list,
+        description="Per-document type classification (one entry per uploaded doc)",
+    )
     summary: str = Field(
         ...,
         description=(

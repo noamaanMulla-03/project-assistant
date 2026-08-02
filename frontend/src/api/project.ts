@@ -110,7 +110,13 @@ export interface MissingQuestion {
 	urgency: "critical" | "high" | "medium" | "low";
 }
 
+export interface DocumentType {
+	filename: string;
+	document_type: string;
+}
+
 export interface ExtractionResult {
+	document_types: DocumentType[];
 	summary: string;
 	facts: Fact[];
 	decisions: Decision[];
@@ -144,7 +150,7 @@ export async function createProject(files: File[]): Promise<ProjectResponse> {
 /** Fetch a project by ID, including live per-document ingestion statuses. */
 export async function getProject(id: string): Promise<ProjectResponse> {
 	const { data } = await apiClient.get<ProjectResponse>(`/projects/${id}`, {
-		headers: { "Cache-Control": "no-cache" }
+		headers: { "Cache-Control": "no-cache" },
 	});
 	return data;
 }
@@ -162,7 +168,10 @@ export async function listProjects(
 
 /** Run AI extraction on a project's documents.  Returns the full structured payload.
  *  Pass force=true to re-run the pipeline even if a cached result exists. */
-export async function analyzeProject(id: string, force = false): Promise<ExtractionResult> {
+export async function analyzeProject(
+	id: string,
+	force = false,
+): Promise<ExtractionResult> {
 	const { data } = await apiClient.post<ExtractionResult>(
 		`/projects/${id}/analyze`,
 		null,
