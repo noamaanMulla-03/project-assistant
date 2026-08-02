@@ -812,6 +812,65 @@ function ProjectReviewWorkspace({ projectId, result, reviewSummary, documents }:
     const pendingCount = reviewState.action_items.filter((a) => a.status === "pending").length;
     const unresolvedCount = reviewState.conflicts.filter((c) => !c.resolved).length;
 
+    // ── Download Handler ──────────────────────────────────────────────────
+
+    const handleDownload = useCallback(() => {
+        const d = new Date().toLocaleDateString();
+        let md = `# Project Action Summary\n_Generated on ${d}_\n\n`;
+
+        // 1. Action Items
+        md += `## 🚀 Action Items\n\n`;
+        if (reviewState.action_items.length === 0) md += `*No action items.*\n\n`;
+        reviewState.action_items.forEach(a => {
+            const statusIcon = a.status === 'approved' ? '✅' : a.status === 'rejected' ? '❌' : '⏳';
+            md += `* ${statusIcon} **[${a.priority.toUpperCase()}]** ${a.edited_content}\n`;
+            if (a.deadline) md += `  *Deadline: ${a.deadline}*\n`;
+        });
+        md += `\n`;
+
+        // 2. Confirmed Facts
+        const facts = reviewState.facts.filter(f => f.classification === 'fact');
+        md += `## 📌 Confirmed Facts\n\n`;
+        if (facts.length === 0) md += `*No confirmed facts.*\n\n`;
+        facts.forEach(f => {
+            md += `* ${f.content} *(Confidence: ${f.confidence})*\n`;
+        });
+        md += `\n`;
+
+        // 3. Assumptions & Unresolved
+        const assumptions = reviewState.facts.filter(f => f.classification !== 'fact');
+        if (assumptions.length > 0) {
+            md += `## ⚠️ Assumptions & Unresolved Items\n\n`;
+            assumptions.forEach(a => {
+                md += `* **[${a.classification.toUpperCase()}]** ${a.content}\n`;
+            });
+            md += `\n`;
+        }
+
+        // 4. Conflicts
+        if (reviewState.conflicts.length > 0) {
+            md += `## ⚔️ Document Conflicts\n\n`;
+            reviewState.conflicts.forEach(c => {
+                const resIcon = c.resolved ? '✅ Resolved' : '🔴 Unresolved';
+                md += `### ${resIcon}\n`;
+                md += `* **Source A (${c.document_a}):** ${c.statement_a}\n`;
+                md += `* **Source B (${c.document_b}):** ${c.statement_b}\n`;
+                if (c.resolution_note) md += `* **Resolution:** ${c.resolution_note}\n`;
+                md += `\n`;
+            });
+        }
+
+        const blob = new Blob([md], { type: "text/markdown;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `Project_Summary_${d.replace(/\//g, '-')}.md`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    }, [reviewState]);
+
     // ── Render ───────────────────────────────────────────────────────────
     return (
         <Split
@@ -934,19 +993,33 @@ function ProjectReviewWorkspace({ projectId, result, reviewSummary, documents }:
                         {saveStatus === "success" && <span className="text-emerald-600 dark:text-emerald-400">✓ Saved</span>}
                         {saveStatus === "error" && <span className="text-red-500">✗ Save failed</span>}
                     </div>
-                    <button
-                        type="button"
-                        onClick={handleFinalize}
-                        disabled={saving}
-                        className={cn(
-                            "rounded-lg px-5 py-2 text-xs font-medium transition-colors",
-                            saving
-                                ? "cursor-not-allowed bg-surface-300 text-surface-500 dark:bg-surface-dark-700 dark:text-surface-dark-400"
-                                : "bg-primary-600 text-white hover:bg-primary-700 dark:bg-primary-500 dark:hover:bg-primary-400 dark:text-surface-dark-950",
-                        )}
-                    >
-                        {saving ? "Saving…" : "Finalize & Save"}
-                    </button>
+                    <div className="flex gap-2">
+                        <button
+                            type="button"
+                            onClick={handleDownload}
+                            className="inline-flex items-center gap-2 rounded-lg border border-surface-200 bg-white px-4 py-2 text-xs font-medium text-surface-700 transition-colors hover:bg-surface-50 dark:border-surface-dark-700 dark:bg-surface-dark-800 dark:text-surface-dark-200 dark:hover:bg-surface-dark-700"
+                        >
+                            <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                                <polyline points="7 10 12 15 17 10" />
+                                <line x1="12" y1="15" x2="12" y2="3" />
+                            </svg>
+                            Download Summary
+                        </button>
+                        <button
+                            type="button"
+                            onClick={handleFinalize}
+                            disabled={saving}
+                            className={cn(
+                                "rounded-lg px-5 py-2 text-xs font-medium transition-colors",
+                                saving
+                                    ? "cursor-not-allowed bg-surface-300 text-surface-500 dark:bg-surface-dark-700 dark:text-surface-dark-400"
+                                    : "bg-primary-600 text-white hover:bg-primary-700 dark:bg-primary-500 dark:hover:bg-primary-400 dark:text-surface-dark-950",
+                            )}
+                        >
+                            {saving ? "Saving…" : "Finalize & Save"}
+                        </button>
+                    </div>
                 </div>
             </div>
 
