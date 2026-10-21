@@ -19,6 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.database import AsyncSessionLocal
 from app.models.knowledge import DocumentChunk, KnowledgeDocument
 from app.schemas.extraction import (
     ConflictDetectionResult,
@@ -50,6 +51,7 @@ async def run_extraction(
     logger.info("Starting agent extraction for: %s", doc_names)
 
     tools = await _build_tools(db, project_doc_ids)
+    await db.rollback()  # Release the read connection during LLM inference.
 
     # ── Native async agent invocation (no more asyncio.to_thread) ──
     try:
@@ -66,6 +68,7 @@ async def run_extraction(
 
     # ── Fetch document chunks per-file for Phase 1 ──
     doc_data = await _fetch_document_data(db, project_doc_ids)
+    await db.rollback()
 
     # ── Extract policy lines from agent output for Phase 3 ──
     policy_lines = _extract_policy_lines(agent_result)
@@ -289,12 +292,7 @@ async def _build_tools(
     db: AsyncSession,
     project_doc_ids: list[UUID],
 ) -> list:
-    """Build two native async LangChain @tools as closures capturing db + doc_ids.
-
-    ── Both tools are now `async def`.  They `await` the database
-       directly instead of wrapping work in `asyncio.run()`, which caused nested
-       event-loop errors when the agent was invoked from an async context.
-    """
+    """Build async agent tools, each with its own short-lived DB session."""
     from langchain_core.tools import tool
 
     # Fetch document filename→id mapping directly (we're in the main event loop)
@@ -321,14 +319,16 @@ async def _build_tools(
             return f"ERROR: Document '{filename}' not found. Available: {available}"
 
         try:
-            chunks_result = await db.execute(
-                select(DocumentChunk)
-                .where(DocumentChunk.document_id == doc_id)
-                .order_by(DocumentChunk.chunk_index)
-                .limit(settings.EXTRACTION_CHUNKS_PER_DOC),
-            )
+            async with AsyncSessionLocal() as tool_db:
+                chunks_result = await tool_db.execute(
+                    select(DocumentChunk)
+                    .where(DocumentChunk.document_id == doc_id)
+                    .order_by(DocumentChunk.chunk_index)
+                    .limit(settings.EXTRACTION_CHUNKS_PER_DOC),
+                )
+                chunks = chunks_result.scalars().all()
             parts = [f"[DOCUMENT: {filename}]"]
-            for chunk in chunks_result.scalars().all():
+            for chunk in chunks:
                 section = _format_section_label(chunk.chunk_index, chunk.metadata_json)
                 parts.append(f"[SECTION: {section}]\n{chunk.content}\n")
             return "\n".join(parts)
@@ -350,9 +350,10 @@ async def _build_tools(
             Policy document chunks with [POLICY: ...] [SECTION: ...] labels.
         """
         try:
-            hits = await _search_policy_chunks(
-                db, query, project_doc_ids, settings.EXTRACTION_POLICY_TOP_K
-            )
+            async with AsyncSessionLocal() as tool_db:
+                hits = await _search_policy_chunks(
+                    tool_db, query, project_doc_ids, settings.EXTRACTION_POLICY_TOP_K
+                )
             if not hits:
                 return f"No relevant policy documents found for query: '{query}'."
             parts = ["=== POLICY SEARCH RESULTS ==="]

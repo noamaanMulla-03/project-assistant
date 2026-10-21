@@ -29,6 +29,7 @@ from app.config import settings
 from app.models.knowledge import DocumentChunk
 
 logger = logging.getLogger(__name__)
+_ingestion_slots = asyncio.Semaphore(2)
 
 # ── Singleton embedding model ─────────────────────────────────────────────────
 # Lazy-loaded on first use; reused for all subsequent ingestions + queries.
@@ -124,6 +125,22 @@ def split_documents(docs: list[LCDocument]) -> list[LCDocument]:
 
 
 async def ingest_document(
+    doc_id: UUID,
+    file_path: Path,
+    file_type: str,
+) -> None:
+    """Limit simultaneous CPU-heavy ingestions on this backend instance."""
+    try:
+        async with _ingestion_slots:
+            await _ingest_document(doc_id, file_path, file_type)
+    except asyncio.CancelledError:
+        from app.models.knowledge import KnowledgeDocument
+
+        await _set_status_fresh(KnowledgeDocument, doc_id, "error")
+        raise
+
+
+async def _ingest_document(
     doc_id: UUID,
     file_path: Path,
     file_type: str,

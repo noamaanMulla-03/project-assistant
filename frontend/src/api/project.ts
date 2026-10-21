@@ -22,6 +22,8 @@ export interface ProjectResponse {
 	created_by_name: string | null;
 	// Cached AI extraction result — null until the first analysis completes
 	analysis_result: ExtractionResult | null;
+	analysis_status: "idle" | "running" | "completed" | "error";
+	analysis_error: string | null;
 	// User-reviewed action summary — null until the user saves their review
 	review_summary: ReviewSummary | null;
 }
@@ -144,6 +146,7 @@ export async function createProject(files: File[]): Promise<ProjectResponse> {
 	const { data } = await apiClient.post<ProjectResponse>("/projects", form, {
 		headers: { "Content-Type": "multipart/form-data" },
 	});
+	window.dispatchEvent(new Event("projects:changed"));
 	return data;
 }
 
@@ -166,13 +169,12 @@ export async function listProjects(
 	return data;
 }
 
-/** Run AI extraction on a project's documents.  Returns the full structured payload.
- *  Pass force=true to re-run the pipeline even if a cached result exists. */
+/** Start analysis and return its current project status immediately. */
 export async function analyzeProject(
 	id: string,
 	force = false,
-): Promise<ExtractionResult> {
-	const { data } = await apiClient.post<ExtractionResult>(
+): Promise<ProjectResponse> {
+	const { data } = await apiClient.post<ProjectResponse>(
 		`/projects/${id}/analyze`,
 		null,
 		{ params: force ? { force: true } : undefined },

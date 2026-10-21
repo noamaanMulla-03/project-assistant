@@ -3,6 +3,7 @@
 import uuid
 from pathlib import Path
 
+import aiofiles
 from fastapi import HTTPException, UploadFile, status
 
 from app.config import settings
@@ -33,20 +34,27 @@ async def save_upload(
         )
 
     max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
-    content = await file.read(max_bytes + 1)
-    if len(content) > max_bytes:
-        raise HTTPException(
-            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-            detail=f"File '{file.filename}' exceeds maximum size of {settings.MAX_UPLOAD_SIZE_MB} MB.",
-        )
-
     stored_name = f"{uuid.uuid4().hex}{extension}"
-    (upload_dir() / stored_name).write_bytes(content)
+    path = upload_dir() / stored_name
+    size = 0
+    try:
+        async with aiofiles.open(path, "wb") as destination:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > max_bytes:
+                    raise HTTPException(
+                        status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                        detail=f"File '{file.filename}' exceeds maximum size of {settings.MAX_UPLOAD_SIZE_MB} MB.",
+                    )
+                await destination.write(chunk)
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
     return KnowledgeDocument(
         filename=file.filename,
         file_type=extension.lstrip("."),
         file_path=stored_name,
-        file_size=len(content),
+        file_size=size,
         uploaded_by=user_id,
         status="processing",
         visibility=visibility,

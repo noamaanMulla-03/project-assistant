@@ -203,15 +203,12 @@ ollama pull gpt-oss:120b-cloud
    ```bash
    docker compose up -d --build
    ```
-3. **Apply migrations**
-   ```bash
-   docker compose exec backend alembic upgrade head
-   ```
-4. **Verify**
+3. **Verify**
    - Backend health check: `curl http://localhost:8000/health`
    - Frontend: `http://localhost:5173`
 
 The HuggingFace embedding model downloads on first ingestion or search (~90 MB).
+The backend runs database migrations when its container starts.
 The backend image installs CPU-only PyTorch. For later starts, use `docker compose up -d`;
 source edits hot-reload without rebuilding. If build cache grows, check `docker system df`
 and reclaim unused cache with `docker builder prune`. Keep the `pgdata`, `uploads`, and
@@ -223,8 +220,8 @@ and reclaim unused cache with `docker builder prune`. Keep the `pgdata`, `upload
 2. **Upload knowledge-base policies** at `/knowledge` (drag-and-drop `.txt`, `.pdf`, or `.docx` files)
 3. **Create a project** at `/project/new` — upload 1–3 project documents
 4. **Wait for indexing** — the UI polls every 3 seconds until all documents show "Ready"
-5. **Start Analysis** — triggers the AI pipeline (may take 20–60 seconds)
-6. **Review results** at `/project/:id/results` — see extracted facts, decisions, risks, conflicts, and policy gaps
+5. **Start Analysis** — queues the AI pipeline and opens a progress page; you can navigate elsewhere while it runs
+6. **Review results** at `/project/:id/results` when analysis completes
 7. **Review & finalize** at `/project/:id/review` — reclassify facts, resolve conflicts, approve/reject action items, save summary
 
 ### Local Development (Without Docker)
@@ -291,7 +288,7 @@ VITE_API_BASE_URL=http://localhost:8000
 
 ## Known Limitations
 
-- **Background Ingestion**: Upload processing runs in the backend process. A process restart interrupts running ingestions; startup marks interrupted documents as errors so they can be retried.
+- **Background Jobs**: Ingestion and analysis run in the backend process with two slots each. A restart interrupts running jobs; startup marks them as errors so they can be retried. This setup supports multiple active users on one backend instance. Multiple backend hosts require shared upload storage and a durable job worker.
 - **LLM Context Limits**: The local LLM context window limits how much cross-document context can be injected into the Phase 2 (Conflict) and Phase 3 (Gap Analysis) prompts. Exceedingly large projects might suffer from context truncation.
 - **Text-Only PDF Parsing**: The current extraction relies purely on text extraction. Images, charts, and complex table layouts in PDFs are not parsed via OCR.
 
@@ -372,7 +369,7 @@ There are two recommended architectures for deploying Project Assistant to produ
 | `GET`    | `/projects`                       | List user's projects (paginated)                      | Bearer |
 | `GET`    | `/projects/{id}`                  | Get project with live doc statuses                    | Bearer |
 | `DELETE` | `/projects/{pid}/documents/{did}` | Remove doc from project (deletes project if last doc) | Bearer |
-| `POST`   | `/projects/{id}/analyze`          | Run AI extraction pipeline (`?force=true` to re-run)  | Bearer |
+| `POST`   | `/projects/{id}/analyze`          | Start analysis (`202`); poll GET for status/result     | Bearer |
 | `PUT`    | `/projects/{id}/review`           | Save user-reviewed action summary                     | Bearer |
 
 ### Health
@@ -454,7 +451,7 @@ docker compose exec backend alembic revision --autogenerate -m "description"  # 
 docker compose exec backend alembic downgrade -1          # Rollback last migration
 ```
 
-**Migration history** (9 versions in `backend/alembic/versions/`):
+**Migration history** (10 versions in `backend/alembic/versions/`):
 
 | Revision       | Description                                                  |
 | -------------- | ------------------------------------------------------------ |
@@ -467,6 +464,7 @@ docker compose exec backend alembic downgrade -1          # Rollback last migrat
 | `g1h2i3j4k5l6` | Add visibility column to knowledge_documents                 |
 | `h2i3j4k5l6m7` | Add analysis_result JSONB to projects                        |
 | `i3j4k5l6m7n8` | Add review_summary JSONB to projects                         |
+| `j4k5l6m7n8o9` | Track background analysis status and errors                  |
 
 ---
 

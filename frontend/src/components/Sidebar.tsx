@@ -252,9 +252,15 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
     const [projects, setProjects] = useState<ProjectResponse[]>([]);
 
     useEffect(() => {
-        listProjects(0, 10).then((res) => {
-            setProjects(res.projects);
-        }).catch(() => { });
+        let active = true;
+        const refresh = () => {
+            listProjects(0, 10).then((res) => {
+                if (active) setProjects(res.projects);
+            }).catch(() => { });
+        };
+        refresh();
+        window.addEventListener("projects:changed", refresh);
+        return () => { active = false; window.removeEventListener("projects:changed", refresh); };
     }, [location.pathname]); // refresh when user navigates (e.g. after creating a project)
 
     // ── Spring-animated width for smooth expand / collapse ────────────────
@@ -392,7 +398,7 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
                         {(projects ?? []).map((p) => (
                             <NavLink
                                 key={p.id}
-                                to={`/project/${p.id}${p.analysis_result ? "/results" : ""}`}
+                                to={`/project/${p.id}${p.analysis_result || p.analysis_status === "running" ? "/results" : ""}`}
                                 className={({ isActive }) =>
                                     cn(
                                         "flex items-center gap-2 rounded-lg px-2 py-1.5 text-xs transition-colors",

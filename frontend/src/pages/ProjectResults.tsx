@@ -5,8 +5,8 @@
 //
 // Analysis results are cached in the DB — on mount, we first check whether
 // the project already has a cached analysis_result (via GET /projects/{id}).
-// If so, we display it instantly.  If not, we run the analysis.
-// The "Redo Analysis" button forces a fresh LLM run via ?force=true.
+// Analysis runs in the backend; this page polls its stored status so users
+// can leave and return without starting a duplicate job.
 
 import { useState, useEffect } from "react";
 import { useParams } from "react-router-dom";
@@ -254,36 +254,68 @@ export default function ProjectResults() {
     const [error, setError] = useState<string | null>(null);
     const [toast, setToast] = useState<string | null>(null);
 
-    // ── Load project and use cached analysis or run fresh ──────────────
+    // ── Load the saved result and job status ────────────────────────────
     useEffect(() => {
         if (!id) return;
+        let active = true;
         setLoading(true);
         setError(null);
+        setProject(null);
+        setResult(null);
 
         getProject(id)
             .then((proj) => {
+                if (!active) return;
                 setProject(proj);
-                // If cached analysis exists, use it directly
                 if (proj.analysis_result) {
                     setResult(normalizeExtraction(proj.analysis_result));
-                    setLoading(false);
-                } else {
-                    // No cached result — run analysis for the first time
-                    return analyzeProject(id).then((extraction) => {
-                        setResult(normalizeExtraction(extraction));
-                        // Refresh project to get the now-cached result
-                        return getProject(id).then(setProject);
-                    });
                 }
             })
             .catch((err: unknown) => {
+                if (!active) return;
                 const detail =
                     (err as { response?: { data?: { detail?: string } } })?.response?.data
                         ?.detail ?? "Failed to load analysis results.";
                 setError(detail);
             })
-            .finally(() => setLoading(false));
+            .finally(() => { if (active) setLoading(false); });
+        return () => { active = false; };
     }, [id]);
+
+    useEffect(() => {
+        if (!id || project?.analysis_status !== "running") return;
+        let active = true;
+        const interval = setInterval(() => {
+            getProject(id).then((updated) => {
+                if (!active) return;
+                setProject(updated);
+                if (updated.analysis_result) {
+                    setResult(normalizeExtraction(updated.analysis_result));
+                }
+                if (updated.analysis_status === "error" && !updated.analysis_result) {
+                    setError(updated.analysis_error ?? "Analysis failed. Please retry.");
+                }
+                if (updated.analysis_status !== "running") {
+                    window.dispatchEvent(new Event("projects:changed"));
+                }
+            }).catch(() => { /* Retry on the next poll. */ });
+        }, 3000);
+        return () => { active = false; clearInterval(interval); };
+    }, [id, project?.analysis_status]);
+
+    const handleStart = async () => {
+        if (!id) return;
+        setLoading(true);
+        setError(null);
+        try {
+            setProject(await analyzeProject(id));
+        } catch (err: unknown) {
+            const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+            setError(detail ?? "Could not start analysis.");
+        } finally {
+            setLoading(false);
+        }
+    };
 
     // ── Redo Analysis handler ──────────────────────────────────────────
     const handleRedo = async () => {
@@ -291,13 +323,8 @@ export default function ProjectResults() {
         setRedoing(true);
         setError(null);
         try {
-            const extraction = await analyzeProject(id, true);
-            setResult(normalizeExtraction(extraction));
-            // Refresh project — review_summary is now null on the server
-            const updated = await getProject(id);
-            setProject(updated);
-            // Notify the user that the previous review was cleared
-            setToast("Analysis updated — your previous review has been reset to match the new results.");
+            setProject(await analyzeProject(id, true));
+            setToast("Reanalysis started. You can leave this page and return later.");
         } catch (err: unknown) {
             const detail =
                 (err as { response?: { data?: { detail?: string } } })?.response?.data
@@ -309,7 +336,7 @@ export default function ProjectResults() {
     };
 
     // ── Loading state ──────────────────────────────────────────────────────
-    if (loading) {
+    if (loading || (project?.analysis_status === "running" && !result)) {
         return (
             <div className="flex h-full flex-col">
                 {/* Navbar shown even during loading */}
@@ -318,7 +345,7 @@ export default function ProjectResults() {
                     <div className="flex flex-col items-center gap-4">
                         <Spinner />
                         <p className="text-sm text-surface-500 dark:text-surface-dark-400">
-                            Running AI analysis on your documents...
+                            {loading ? "Loading analysis..." : "Running AI analysis. You can navigate away and return later."}
                         </p>
                     </div>
                 </div>
@@ -334,12 +361,12 @@ export default function ProjectResults() {
                 <div className="px-4 py-12">
                     <div className="mx-auto max-w-2xl">
                         <div className="rounded-xl border border-red-200 bg-red-50 p-6 text-center dark:border-red-800 dark:bg-red-950/30">
-                            <p className="text-sm text-red-700 dark:text-red-400">{error ?? "No results found."}</p>
+                            <p className="text-sm text-red-700 dark:text-red-400">{error ?? project?.analysis_error ?? "No analysis has been started."}</p>
                             <button
-                                onClick={() => window.location.reload()}
+                                onClick={handleStart}
                                 className="mt-4 text-sm font-medium text-red-600 underline hover:no-underline dark:text-red-400"
                             >
-                                Retry
+                                {project?.analysis_status === "error" ? "Retry analysis" : "Start analysis"}
                             </button>
                         </div>
                     </div>
@@ -359,6 +386,21 @@ export default function ProjectResults() {
 
             {/* Toast notification */}
             {toast && <Toast message={toast} onDismiss={() => setToast(null)} />}
+            {project?.analysis_status === "running" && (
+                <p className="mx-auto mt-4 max-w-5xl rounded-lg bg-amber-50 p-3 text-sm text-amber-800 dark:bg-amber-950/30 dark:text-amber-200">
+                    Reanalysis is running. You can navigate away and return later; the previous result remains visible until it finishes.
+                </p>
+            )}
+            {project?.analysis_status === "error" && (
+                <p className="mx-auto mt-4 max-w-5xl rounded-lg bg-red-50 p-3 text-sm text-red-700 dark:bg-red-950/30 dark:text-red-300">
+                    Reanalysis failed: {project.analysis_error ?? "Please try again."}
+                </p>
+            )}
+            {error && project?.analysis_status !== "error" && (
+                <p className="mx-auto mt-4 max-w-5xl rounded-lg bg-red-50 p-3 text-sm text-red-700 dark:bg-red-950/30 dark:text-red-300">
+                    {error}
+                </p>
+            )}
 
             <div className="flex-1 overflow-y-auto px-4 py-12">
                 <div className="mx-auto max-w-5xl">
@@ -378,7 +420,7 @@ export default function ProjectResults() {
                             <button
                                 type="button"
                                 onClick={handleRedo}
-                                disabled={redoing}
+                                disabled={redoing || project?.analysis_status === "running"}
                                 className={cn(
                                     "inline-flex items-center gap-2 rounded-lg px-4 py-2 text-xs font-medium transition-colors",
                                     redoing

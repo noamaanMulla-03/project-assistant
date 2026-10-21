@@ -16,20 +16,20 @@ import uuid
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, status
 from fastapi.responses import JSONResponse
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import get_current_user, get_db
 from app.models.knowledge import KnowledgeDocument
 from app.models.project import Project
 from app.models.user import User
-from app.schemas.extraction import ExtractionResult
 from app.schemas.project import (
     ProjectDocumentRef,
     ProjectListResponse,
     ProjectResponse,
     ReviewSummaryRequest,
 )
+from app.services.analysis import analyze_project_background
 from app.services.uploads import save_upload, upload_dir
 from app.services.vectorization import ingest_documents
 
@@ -84,11 +84,15 @@ def _project_to_response(
     """Map ORM project + resolved docs to the Pydantic response schema."""
     return ProjectResponse(
         id=project.id,
-        status=project.status,
+        status=_derive_project_status([doc.status for doc in docs]),
         documents=docs,
         created_at=project.created_at,
         created_by_name=project.creator.full_name if project.creator else None,
         analysis_result=project.analysis_result,
+        analysis_status=project.analysis_status or (
+            "completed" if project.analysis_result else "idle"
+        ),
+        analysis_error=project.analysis_error,
         review_summary=project.review_summary,
     )
 
@@ -127,27 +131,29 @@ async def create_project(
             detail="At least one file is required (file1, file2, or file3).",
         )
 
-    doc_rows = [await save_upload(file, current_user.id, "private") for file in files]
+    doc_rows: list[KnowledgeDocument] = []
+    try:
+        for file in files:
+            doc_rows.append(await save_upload(file, current_user.id, "private"))
 
-    # Bulk-persist all KnowledgeDocument rows
-    db.add_all(doc_rows)
-    await db.flush()
-    # Refresh all to get their IDs populated
-    for d in doc_rows:
-        await db.refresh(d)
+        db.add_all(doc_rows)
+        await db.flush()
+        for d in doc_rows:
+            await db.refresh(d)
 
-    # Create the Project row linking all document UUIDs
-    project = Project(
-        created_by=current_user.id,
-        document_ids=[d.id for d in doc_rows],
-        status="indexing",
-    )
-    db.add(project)
-    await db.flush()
-    await db.refresh(project)
-
-    # Commit now so the background tasks can see these rows in their sessions
-    await db.commit()
+        project = Project(
+            created_by=current_user.id,
+            document_ids=[d.id for d in doc_rows],
+            status="indexing",
+        )
+        db.add(project)
+        await db.flush()
+        await db.refresh(project)
+        await db.commit()
+    except BaseException:
+        for doc in doc_rows:
+            (upload_dir() / doc.file_path).unlink(missing_ok=True)
+        raise
 
     background_tasks.add_task(
         ingest_documents,
@@ -204,8 +210,6 @@ async def get_project(
 
     # Resolve current per-document statuses from KnowledgeDocument rows
     doc_refs = await _resolve_documents(db, project.document_ids)
-    project.status = _derive_project_status([d.status for d in doc_refs])
-
     return _project_to_response(project, doc_refs)
 
 
@@ -243,7 +247,6 @@ async def list_projects(
     project_responses: list[ProjectResponse] = []
     for p in projects:
         doc_refs = await _resolve_documents(db, p.document_ids)
-        p.status = _derive_project_status([d.status for d in doc_refs])
         project_responses.append(_project_to_response(p, doc_refs))
 
     return ProjectListResponse(projects=project_responses, total=total)
@@ -343,30 +346,18 @@ async def remove_project_document(
 
 @router.post(
     "/{project_id}/analyze",
-    response_model=ExtractionResult,
-    summary="Run AI extraction on a project's documents",
+    response_model=ProjectResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Start AI extraction on a project's documents",
 )
 async def analyze_project(
     project_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
     force: bool = False,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Analyze up to three project documents using the LangChain/Ollama pipeline.
-
-    If a cached analysis_result exists and ``force`` is False, returns the
-    cached result immediately without running the LLM.  Pass ``?force=true``
-    to re-run the full pipeline (the "Redo Analysis" button).
-
-    Retrieves pre-vectorized document chunks from pgvector, searches for
-    relevant organizational policy chunks via pgvector, then runs a local LLM
-    (Qwen3 7B via Ollama) to extract facts, decisions, assumptions, risks,
-    open questions, action items, cross-document conflicts, and policy-gap
-    missing actions.
-
-    Returns 409 if any project document is still indexing.  Returns 502 if
-    the LLM is unreachable or fails.
-    """
+    """Start analysis and return immediately; poll GET /projects/{id} for status."""
     # 1. Fetch project and verify ownership
     result = await db.execute(select(Project).where(Project.id == project_id))
     project = result.scalar_one_or_none()
@@ -383,12 +374,13 @@ async def analyze_project(
             detail="You do not have permission to analyse this project.",
         )
 
-    # 2. Return cached result if available and force is not set
-    if not force and project.analysis_result is not None:
-        return ExtractionResult(**project.analysis_result)
-
-    # 3. Verify all documents have finished ingestion
+    # Check document status before starting new work.
     doc_refs = await _resolve_documents(db, project.document_ids)
+    if project.analysis_status == "running" or (
+        not force and project.analysis_result is not None
+    ):
+        return _project_to_response(project, doc_refs)
+
     unindexed = [d for d in doc_refs if d.status != "indexed"]
     if unindexed:
         names = ", ".join(f"'{d.filename}' ({d.status})" for d in unindexed)
@@ -400,26 +392,19 @@ async def analyze_project(
             ),
         )
 
-    # 4. Run the 4-phase extraction pipeline (orchestrated internally)
-    from app.services.extraction import run_extraction
-
-    try:
-        extraction_result = await run_extraction(db, project.document_ids)
-    except RuntimeError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=str(exc),
+    # Claim the project once, including when two tabs start analysis together.
+    claimed = await db.execute(
+        update(Project)
+        .where(Project.id == project_id, Project.analysis_status != "running")
+        .values(analysis_status="running", analysis_error=None)
+    )
+    await db.commit()
+    if claimed.rowcount:
+        background_tasks.add_task(
+            analyze_project_background, project_id, list(project.document_ids), force
         )
-
-    # 5. Cache the result in the DB so subsequent loads skip the LLM
-    project.analysis_result = extraction_result.model_dump()
-    # Clear the saved review so the review page re-initialises from the new analysis.
-    # The frontend will show a toast notifying the user their review has been reset.
-    if force:
-        project.review_summary = None
-    await db.flush()
-
-    return extraction_result
+    await db.refresh(project)
+    return _project_to_response(project, doc_refs)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -457,6 +442,11 @@ async def save_review(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You can only save reviews for your own projects.",
+        )
+    if project.analysis_status == "running":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Wait for the current analysis to finish before saving a review.",
         )
 
     # 2. Ensure an analysis exists before allowing a review save

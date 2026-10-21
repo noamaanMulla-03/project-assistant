@@ -43,6 +43,7 @@ async def lifespan(app: FastAPI):
         try:
             from sqlalchemy import update
             from app.models.knowledge import KnowledgeDocument
+            from app.models.project import Project
 
             result = await db.execute(
                 update(KnowledgeDocument)
@@ -58,6 +59,14 @@ async def lifespan(app: FastAPI):
                     "'processing' to 'error' (ingestion task lost on restart).",
                     orphan_count,
                 )
+            await db.execute(
+                update(Project)
+                .where(Project.analysis_status == "running")
+                .values(
+                    analysis_status="error",
+                    analysis_error="Analysis was interrupted by a server restart. Please retry.",
+                )
+            )
             await db.commit()
         except Exception:
             pass

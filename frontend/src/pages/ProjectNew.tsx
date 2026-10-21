@@ -316,7 +316,7 @@ export default function ProjectNew() {
             return;
         }
 
-        // Post-upload: delete the document from DB/disk/FAISS + update project
+        // Post-upload: delete the document from storage and update the project
         const docRef = project.documents[index];
         if (!docRef) return;
 
@@ -356,6 +356,10 @@ export default function ProjectNew() {
     // ── Start AI analysis ───────────────────────────────────────────────
     const handleAnalyze = async () => {
         if (!project?.id) return;
+        if (project.analysis_status === "running") {
+            navigate(`/project/${project.id}/results`);
+            return;
+        }
         setIsAnalyzing(true);
         setError(null);
         try {
@@ -387,8 +391,8 @@ export default function ProjectNew() {
 
     return (
         <div className="flex h-full flex-col">
-            {project?.id && (
-                <ProjectNavbar projectId={project.id} hasAnalysis={!!project.analysis_result} />
+                {project?.id && (
+                <ProjectNavbar projectId={project.id} hasAnalysis={!!project.analysis_result || project.analysis_status === "running"} />
             )}
             <div className="flex-1 overflow-y-auto px-4 py-12">
                 <div className="mx-auto max-w-5xl">
@@ -472,7 +476,11 @@ export default function ProjectNew() {
                             >
                                 {isAnalyzing ? (
                                     <>
-                                        <Spinner /> Analyzing...
+                                        <Spinner /> Starting analysis...
+                                    </>
+                                ) : project.analysis_status === "running" ? (
+                                    <>
+                                        <Spinner /> View analysis progress
                                     </>
                                 ) : isPolling ? (
                                     <>
@@ -493,7 +501,9 @@ export default function ProjectNew() {
                         {project && (
                             <p className="text-xs text-surface-400 dark:text-surface-dark-500">
                                 {isAnalyzing
-                                    ? "AI analysis in progress — this may take 20-40 seconds for large documents."
+                                    ? "Starting analysis..."
+                                    : project.analysis_status === "running"
+                                        ? "Analysis is running. You can navigate away and return later."
                                     : isPolling
                                         ? "Documents are being processed. This may take a minute for large files."
                                         : isReady

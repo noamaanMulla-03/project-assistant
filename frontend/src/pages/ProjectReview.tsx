@@ -684,13 +684,24 @@ export default function ProjectReview() {
 
     useEffect(() => {
         if (!id) return;
+        let active = true;
         setLoading(true);
         setError(null);
         getProject(id)
-            .then(p => setProject(p))
-            .catch(() => setError("Failed to load project."))
-            .finally(() => setLoading(false));
+            .then(p => { if (active) setProject(p); })
+            .catch(() => { if (active) setError("Failed to load project."); })
+            .finally(() => { if (active) setLoading(false); });
+        return () => { active = false; };
     }, [id]);
+
+    useEffect(() => {
+        if (!id || project?.analysis_status !== "running") return;
+        let active = true;
+        const interval = setInterval(() => {
+            getProject(id).then(p => { if (active) setProject(p); }).catch(() => { });
+        }, 3000);
+        return () => { active = false; clearInterval(interval); };
+    }, [id, project?.analysis_status]);
 
     if (loading) {
         return (
@@ -701,11 +712,22 @@ export default function ProjectReview() {
         );
     }
 
+    if (project?.analysis_status === "running") {
+        return (
+            <div className="flex h-full flex-col">
+                <ProjectNavbar projectId={id!} hasAnalysis={true} />
+                <div className="flex flex-1 items-center justify-center text-sm text-surface-500">
+                    Analysis is running. Review will be available when it finishes; you can navigate elsewhere meanwhile.
+                </div>
+            </div>
+        );
+    }
+
     if (error || !project || !project.analysis_result) {
         return (
             <div className="flex h-full flex-col">
                 {id && <ProjectNavbar projectId={id} hasAnalysis={!!project?.analysis_result} />}
-                <div className="flex flex-1 items-center justify-center text-sm text-red-500">{error || "Analysis not found."}</div>
+                <div className="flex flex-1 items-center justify-center text-sm text-red-500">{error || project?.analysis_error || "Analysis not found."}</div>
             </div>
         );
     }

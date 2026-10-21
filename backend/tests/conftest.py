@@ -93,6 +93,8 @@ def sample_project(
                 }
             ],
         },
+        analysis_status="completed",
+        analysis_error=None,
         review_summary=None,
     )
 

@@ -7,7 +7,7 @@ from datetime import datetime, UTC
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from fastapi import HTTPException, status
+from fastapi import BackgroundTasks, HTTPException, status
 
 from app.models.project import Project
 from app.models.user import User
@@ -95,27 +95,18 @@ async def test_analyze_returns_cached_result(
     project_result.scalar_one_or_none.return_value = sample_project
     mock_db.execute.return_value = project_result
 
-    from app.schemas.extraction import ExtractionResult
-
-    fake_extraction = ExtractionResult(
-        document_types=[],
-        summary="Fake",
-    )
-
-    with patch(
-        "app.services.extraction.run_extraction",
-        AsyncMock(return_value=fake_extraction),
-    ) as mock_run:
+    tasks = BackgroundTasks()
+    with patch("app.routers.project._resolve_documents", AsyncMock(return_value=[])):
         result = await analyze_project(
             project_id=sample_project.id,
+            background_tasks=tasks,
             force=False,
             db=mock_db,
             current_user=sample_user,
         )
-        # run_extraction must NOT be called (cached result used)
-        mock_run.assert_not_called()
 
-    assert result.facts[0].content == "test fact"
+    assert result.analysis_result["facts"][0]["content"] == "test fact"
+    assert not tasks.tasks
 
 
 @pytest.mark.asyncio
@@ -126,36 +117,51 @@ async def test_analyze_force_reruns_pipeline(
     # Mock project query
     project_result = MagicMock()
     project_result.scalar_one_or_none.return_value = sample_project
-    mock_db.execute.side_effect = [
-        project_result,  # project fetch
-        MagicMock(),  # _resolve_documents returns empty via scalars
-    ]
+    claim_result = MagicMock()
+    claim_result.rowcount = 1
+    mock_db.execute.side_effect = [project_result, claim_result]
+    tasks = BackgroundTasks()
 
-    # Provide a minimal ExtractionResult from the mocked pipeline
-    from app.schemas.extraction import ExtractionResult
+    async def refresh(project):
+        project.analysis_status = "running"
 
-    fake_extraction = ExtractionResult(
-        document_types=[],
-        summary="Forced re-run summary.",
-    )
+    mock_db.refresh.side_effect = refresh
+    with patch("app.routers.project._resolve_documents", AsyncMock(return_value=[])):
+        result = await analyze_project(
+            project_id=sample_project.id,
+            background_tasks=tasks,
+            force=True,
+            db=mock_db,
+            current_user=sample_user,
+        )
 
-    with patch(
-        "app.services.extraction.run_extraction",
-        AsyncMock(return_value=fake_extraction),
-    ):
-        # Also mock _resolve_documents to return indexed docs
-        with patch(
-            "app.routers.project._resolve_documents",
-            AsyncMock(return_value=[]),
-        ):
-            result = await analyze_project(
-                project_id=sample_project.id,
-                force=True,
-                db=mock_db,
-                current_user=sample_user,
-            )
+    assert result.analysis_status == "running"
+    assert len(tasks.tasks) == 1
+    assert tasks.tasks[0].args[0] == sample_project.id
 
-    assert result.summary == "Forced re-run summary."
+
+@pytest.mark.asyncio
+async def test_analyze_running_does_not_start_duplicate(
+    mock_db: AsyncMock, sample_user, sample_project
+):
+    sample_project.analysis_status = "running"
+    project_result = MagicMock()
+    project_result.scalar_one_or_none.return_value = sample_project
+    mock_db.execute.return_value = project_result
+    tasks = BackgroundTasks()
+
+    with patch("app.routers.project._resolve_documents", AsyncMock(return_value=[])):
+        response = await analyze_project(
+            project_id=sample_project.id,
+            background_tasks=tasks,
+            force=True,
+            db=mock_db,
+            current_user=sample_user,
+        )
+
+    assert response.analysis_status == "running"
+    assert not tasks.tasks
+    mock_db.execute.assert_awaited_once()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -180,6 +186,7 @@ async def test_analyze_forbidden_wrong_user(mock_db: AsyncMock, sample_project):
     with pytest.raises(HTTPException) as exc:
         await analyze_project(
             project_id=sample_project.id,
+            background_tasks=BackgroundTasks(),
             db=mock_db,
             current_user=other_user,
         )

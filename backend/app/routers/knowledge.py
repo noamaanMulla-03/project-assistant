@@ -82,13 +82,15 @@ async def upload_document(
     embeds the chunks, and stores them in pgvector.
     """
     doc = await save_upload(file, current_user.id, "public")
-    db.add(doc)
-    await db.flush()
-    await db.refresh(doc)
-
-    # Commit now so the background task's separate DB session can see this row.
-    # (The get_db dependency will also try to commit, which becomes a no-op.)
-    await db.commit()
+    try:
+        db.add(doc)
+        await db.flush()
+        await db.refresh(doc)
+        # Commit before the background task opens its own session.
+        await db.commit()
+    except BaseException:
+        (upload_dir() / doc.file_path).unlink(missing_ok=True)
+        raise
 
     background_tasks.add_task(
         ingest_document, doc.id, upload_dir() / doc.file_path, doc.file_type

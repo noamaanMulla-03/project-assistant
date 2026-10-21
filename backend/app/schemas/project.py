@@ -37,6 +37,8 @@ class ProjectResponse(BaseModel):
     created_by_name: str | None  # full_name of creator, null if user deleted
     # Cached AI extraction result — None until the first analysis completes
     analysis_result: dict[str, Any] | None = None
+    analysis_status: str = "idle"  # idle | running | completed | error
+    analysis_error: str | None = None
     # User-reviewed action summary — None until the user saves their review
     review_summary: dict[str, Any] | None = None
 

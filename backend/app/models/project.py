@@ -13,7 +13,7 @@ import uuid
 from datetime import datetime
 from typing import Any, TYPE_CHECKING
 
-from sqlalchemy import DateTime, ForeignKey, String, func
+from sqlalchemy import DateTime, ForeignKey, String, Text, func
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -60,6 +60,10 @@ class Project(Base):
         default=None,
         comment="Cached ExtractionResult JSON from POST /projects/{id}/analyze",
     )
+    analysis_status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="idle", server_default="idle"
+    )
+    analysis_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Human-reviewed action summary — NULL until the user clicks "Finalize & Save".
     # Contains the user's corrections, reclassifications, and conflict resolutions.
     review_summary: Mapped[dict[str, Any] | None] = mapped_column(
