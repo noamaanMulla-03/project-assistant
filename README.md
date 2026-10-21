@@ -33,7 +33,6 @@ graph TD
 
     subgraph Backend Services
         B[FastAPI Backend Port 8000]
-        FAISS[(In-Memory FAISS)]
     end
 
     subgraph Data Layer
@@ -47,11 +46,9 @@ graph TD
     F <-->|REST API / JWT| B
     B -->|SQL / pgvector| DB
     B <-->|Inference| O
-    B <-->|ANN Search| FAISS
-    DB -->|Build Index| FAISS
 ```
 
-The backend proxies LLM calls to **Ollama** running on the host machine. Embedding is handled locally via `sentence-transformers/all-MiniLM-L6-v2` (384-dim vectors). Document chunks are stored in PostgreSQL with the **pgvector** extension and indexed in an in-memory **FAISS** index for fast ANN search.
+The backend proxies LLM calls to **Ollama** running on the host machine. Embedding is handled locally via `sentence-transformers/all-MiniLM-L6-v2` (384-dim vectors). Document chunks are stored and searched in PostgreSQL with the **pgvector** extension.
 
 ---
 
@@ -64,7 +61,7 @@ project_assistant/
 ├── README.md
 │
 ├── backend/
-│   ├── Dockerfile                  # Python 3.12-slim + uv + libopenblas
+│   ├── Dockerfile                  # Python 3.12-slim + uv
 │   ├── requirements.txt            # Pinned Python dependencies
 │   ├── pytest.ini                  # asyncio_mode = strict
 │   ├── alembic.ini                 # Alembic configuration
@@ -92,15 +89,17 @@ project_assistant/
 │   │   ├── services/
 │   │   │   ├── auth.py             # Registration, login, token blacklist logic
 │   │   │   ├── extraction.py       # LangGraph agent + 4-phase structured pipeline
-│   │   │   ├── vectorization.py    # PDF/DOCX/TXT load → split → embed → pgvector + FAISS
-│   │   │   └── faiss_service.py    # Singleton FAISS IndexIDMap(IndexFlatIP) wrapper
+│   │   │   ├── vectorization.py    # PDF/DOCX/TXT load → split → embed → pgvector
+│   │   │   ├── search.py           # Public chunk similarity search in pgvector
+│   │   │   └── uploads.py          # Shared upload validation and storage
 │   │   └── utils/
 │   │       └── security.py         # bcrypt hashing, JWT create/decode
 │   ├── tests/
 │   │   ├── conftest.py             # Shared fixtures: users, DB, projects, docs
 │   │   ├── test_extraction_schemas.py   # Pydantic schema validation
 │   │   ├── test_extraction_pipeline.py  # Pipeline assembly + Phase 4 compression
-│   │   ├── test_faiss_service.py        # FAISS build/add/search with synthetic vectors
+│   │   ├── test_search.py               # pgvector query construction and scoring
+│   │   ├── test_uploads.py              # Upload validation and storage
 │   │   ├── test_auth.py                 # Register, login, refresh, logout
 │   │   ├── test_knowledge_crud.py       # List, delete, search
 │   │   ├── test_routers.py              # Review save endpoint
@@ -163,7 +162,7 @@ project_assistant/
 ### Completed Scope
 - **Document Ingestion**: Parsing of PDF, DOCX, and TXT files, chunking, and generation of embeddings using HuggingFace.
 - **Local AI Pipeline**: Full integration with local Ollama for privacy-preserving, structured JSON extraction.
-- **Advanced Agent Workflow**: A LangGraph agent that autonomously retrieves project documents and cross-references organizational policies via FAISS ANN search.
+- **Advanced Agent Workflow**: A LangGraph agent that autonomously retrieves project documents and cross-references organizational policies via pgvector search.
 - **Structured Outputs**: 4-phase Pydantic-enforced LLM extraction to guarantee consistent data shapes without regex hacks.
 - **Review Workspace**: A robust React split-pane interface for human-in-the-loop validation, conflict resolution, and document viewing.
 
@@ -204,11 +203,19 @@ ollama pull gpt-oss:120b-cloud
    ```bash
    docker compose up -d --build
    ```
-3. **Verify**
+3. **Apply migrations**
+   ```bash
+   docker compose exec backend alembic upgrade head
+   ```
+4. **Verify**
    - Backend health check: `curl http://localhost:8000/health`
    - Frontend: `http://localhost:5173`
 
-On first startup, Alembic migrations run automatically, the HuggingFace embedding model downloads (~90 MB), and the FAISS index builds from existing vectors.
+The HuggingFace embedding model downloads on first ingestion or search (~90 MB).
+The backend image installs CPU-only PyTorch. For later starts, use `docker compose up -d`;
+source edits hot-reload without rebuilding. If build cache grows, check `docker system df`
+and reclaim unused cache with `docker builder prune`. Keep the `pgdata`, `uploads`, and
+`hf_cache` volumes if you want to retain database records, uploaded files, and model downloads.
 
 ### Typical Usage Flow
 
@@ -284,7 +291,7 @@ VITE_API_BASE_URL=http://localhost:8000
 
 ## Known Limitations
 
-- **In-Memory FAISS Scaling**: The FAISS index is held in-memory via a singleton wrapper (`faiss_service.py`). This prevents the backend from scaling horizontally (multiple worker nodes) out of the box. A transition to a distributed vector store (or relying solely on pgvector's HNSW index) is required for high availability across multiple backend instances.
+- **Background Ingestion**: Upload processing runs in the backend process. A process restart interrupts running ingestions; startup marks interrupted documents as errors so they can be retried.
 - **LLM Context Limits**: The local LLM context window limits how much cross-document context can be injected into the Phase 2 (Conflict) and Phase 3 (Gap Analysis) prompts. Exceedingly large projects might suffer from context truncation.
 - **Text-Only PDF Parsing**: The current extraction relies purely on text extraction. Images, charts, and complex table layouts in PDFs are not parsed via OCR.
 
@@ -304,7 +311,7 @@ There are two recommended architectures for deploying Project Assistant to produ
 #### 2. Backend (FastAPI)
 - Containerize the FastAPI backend and push the image to **Amazon ECR**.
 - Deploy using **Amazon ECS with Fargate**.
-- **Crucial limitation regarding FAISS**: Because the current FAISS implementation is in-memory per-process, you must either limit to a single Fargate task (vertical scaling) or transition the FAISS logic fully to RDS pgvector if running multiple instances.
+- Vector search uses PostgreSQL with pgvector, so backend instances share the same stored embeddings.
 - For the LLM, either run Ollama on an EC2 instance equipped with GPUs (e.g., `g5` instances) and point `OLLAMA_BASE_URL` to it, or transition the code to use a managed LLM API (like AWS Bedrock).
 
 #### 3. Frontend (React/Vite)
@@ -330,6 +337,7 @@ There are two recommended architectures for deploying Project Assistant to produ
 - Connect your GitHub repository to **Vercel**.
 - Vercel will automatically detect the Vite React project and use the provided `vercel.json` for routing rules.
 - Add your `VITE_API_BASE_URL` pointing to your Railway backend URL in the Vercel environment variables settings.
+- If the frontend and API use different sites, set `REFRESH_COOKIE_SAMESITE=none` on the backend and set `CORS_ORIGINS` to the exact HTTPS frontend origin. Browsers that block third-party cookies may still require serving the API from the same site as the frontend.
 
 ---
 
@@ -353,8 +361,8 @@ There are two recommended architectures for deploying Project Assistant to produ
 | `GET`    | `/knowledge/documents`           | List all public documents (paginated)           | Bearer |
 | `GET`    | `/knowledge/documents/{id}`      | Download document file                          | Bearer |
 | `GET`    | `/knowledge/documents/{id}/text` | Get reconstructed text from chunks              | Bearer |
-| `DELETE` | `/knowledge/documents/{id}`      | Delete document + chunks + FAISS entries        | Bearer |
-| `POST`   | `/knowledge/search`              | Semantic search via FAISS ANN                   | Bearer |
+| `DELETE` | `/knowledge/documents/{id}`      | Delete document and its chunks                  | Bearer |
+| `POST`   | `/knowledge/search`              | Semantic search via pgvector                    | Bearer |
 
 ### Projects (`/projects`)
 
@@ -399,7 +407,7 @@ The extraction pipeline has two stages:
 A LangGraph agent with 2 async tools autonomously explores:
 
 1. **`retrieve_document_chunks(filename)`** — Fetches pre-vectorized chunks from pgvector for each uploaded document. Returns `[DOCUMENT:...] [SECTION:...]`-labeled text.
-2. **`search_policy_kb(query)`** — Searches the organizational knowledge base via FAISS ANN. Returns `[POLICY:...] [SECTION:...]`-labeled chunks.
+2. **`search_policy_kb(query)`** — Searches the organizational knowledge base via pgvector. Returns `[POLICY:...] [SECTION:...]`-labeled chunks.
 
 The agent autonomously retrieves all documents, then searches for relevant policies. The agent then terminates and outputs a terse list of discovered topics. Its narrative output is not consumed directly — the extracted policy lines feed into Stage B.
 
@@ -464,32 +472,33 @@ docker compose exec backend alembic downgrade -1          # Rollback last migrat
 
 ## Testing
 
-**38 tests** across 7 files, all passing:
+Run the backend tests:
 
 ```bash
 # Run all tests
 docker compose exec backend python -m pytest tests/ -v
 
 # Run a specific test file
-docker compose exec backend python -m pytest tests/test_faiss_service.py -v
+docker compose exec backend python -m pytest tests/test_search.py -v
 
 # Run a specific test function
-docker compose exec backend python -m pytest tests/test_faiss_service.py::test_search_self_match_perfect -v
+docker compose exec backend python -m pytest tests/test_search.py::test_public_search_filters_before_limit -v
 ```
 
 ### Test Coverage
 
-| File                          | Tests | What it covers                                                                                          |
-| ----------------------------- | ----- | ------------------------------------------------------------------------------------------------------- |
-| `test_extraction_schemas.py`  | 3     | Pydantic literal enforcement (confidence, severity), empty conflict handling                            |
-| `test_extraction_pipeline.py` | 7     | Document type assembly, per-doc flattening, empty docs, conflict/gap assembly, Phase 4 compression      |
-| `test_faiss_service.py`       | 5     | Build index, add chunks (idempotent mapping), search (top-k, self-match ≈1.0, empty index)              |
-| `test_auth.py`                | 5     | Register (success, duplicate 409), login (success, invalid 401), refresh (missing cookie 401), logout   |
-| `test_knowledge_crud.py`      | 4     | List (empty, with data), delete (404), search (no hits, with hits)                                      |
-| `test_routers.py`             | 3     | Review save (success, 409 no-analysis, 403 wrong user)                                                  |
-| `test_project_crud.py`        | 5     | List empty, get 404, analyze (cached return, force re-run, 403), review save (success, 409 no-analysis) |
+| File                          | What it covers                                                                                 |
+| ----------------------------- | ---------------------------------------------------------------------------------------------- |
+| `test_extraction_schemas.py`  | Pydantic literal enforcement and empty conflict handling                                      |
+| `test_extraction_pipeline.py` | Extraction assembly and Phase 4 compression                                                   |
+| `test_search.py`              | Public visibility filtering, excluded documents, similarity scoring, and empty results        |
+| `test_uploads.py`             | Upload validation and storage                                                                 |
+| `test_auth.py`                | Registration, login, refresh, logout, and cookie origin checks                                |
+| `test_knowledge_crud.py`      | Document listing, deletion authorization, and search responses                                |
+| `test_routers.py`             | Review save endpoint                                                                          |
+| `test_project_crud.py`        | Project listing, access authorization, analysis, and review                                   |
 
-All tests use mocked DB sessions — no real PostgreSQL required. The FAISS tests use a real `FAISSService` instance with synthetic 384-d normalized vectors.
+These unit tests use mocked DB sessions; an integration test with PostgreSQL is needed to verify the pgvector query end to end.
 
 ---
 
@@ -536,7 +545,6 @@ test-docs/
 |              | langchain-ollama            | 0.2+             |
 |              | langchain-huggingface       | 0.1+             |
 |              | sentence-transformers       | 3.0+             |
-|              | FAISS                       | 1.8+             |
 |              | Ollama                      | Latest           |
 | **Database** | PostgreSQL                  | 16               |
 |              | pgvector                    | 0.3+ (extension) |

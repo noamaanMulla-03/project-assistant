@@ -7,15 +7,12 @@
 #   - "private" → project documents, visible only to the user who uploaded them
 
 import uuid
-from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
-from app.config import settings
 from app.dependencies import get_current_user, get_db
 from app.models.knowledge import DocumentChunk, KnowledgeDocument
 from app.models.user import User
@@ -29,25 +26,11 @@ from app.schemas.knowledge import (
     SearchResponse,
     SearchResult,
 )
+from app.services.search import search_public_chunks
+from app.services.uploads import save_upload, upload_dir
+from app.services.vectorization import ingest_document
 
 router = APIRouter(prefix="/knowledge", tags=["knowledge"])
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-
-def _validate_extension(filename: str) -> str:
-    """Return the lowercase extension if allowed, otherwise raise 400."""
-    ext = Path(filename).suffix.lower()
-    if ext not in settings.allowed_upload_extensions_set:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                f"File type '{ext}' is not allowed. "
-                f"Accepted: {', '.join(sorted(settings.allowed_upload_extensions_set))}"
-            ),
-        )
-    return ext
-
 
 # Map file_type to the correct MIME for inline browser rendering
 _MIME_MAP: dict[str, str] = {
@@ -60,13 +43,6 @@ _MIME_MAP: dict[str, str] = {
 def _mime_for_type(file_type: str) -> str:
     """Return the correct MIME type for a file type, defaulting to octet-stream."""
     return _MIME_MAP.get(file_type, "application/octet-stream")
-
-
-def _resolve_upload_path() -> Path:
-    """Return the absolute upload directory, creating it if needed."""
-    path = Path(settings.UPLOAD_DIR).resolve()
-    path.mkdir(parents=True, exist_ok=True)
-    return path
 
 
 async def _count_documents(db: AsyncSession) -> int:
@@ -92,6 +68,7 @@ async def _count_documents(db: AsyncSession) -> int:
 )
 async def upload_document(
     file: UploadFile,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -102,44 +79,9 @@ async def upload_document(
     the original filename is preserved in the database.
 
     After the response is sent, a background task extracts text, chunks it,
-    embeds the chunks, and indexes them in pgvector + FAISS.
+    embeds the chunks, and stores them in pgvector.
     """
-    # Validate filename and extension
-    if not file.filename:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No filename provided.",
-        )
-
-    ext = _validate_extension(file.filename)
-
-    # Read the file content into memory (async)
-    content = await file.read()
-
-    # Enforce max upload size
-    max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
-    if len(content) > max_bytes:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"File exceeds maximum size of {settings.MAX_UPLOAD_SIZE_MB} MB.",
-        )
-
-    # Write to disk with a UUID-safe name
-    upload_dir = _resolve_upload_path()
-    stored_name = f"{uuid.uuid4().hex}{ext}"
-    disk_path = upload_dir / stored_name
-    disk_path.write_bytes(content)
-
-    # Persist metadata — status starts as "processing" until background ingestion finishes
-    doc = KnowledgeDocument(
-        filename=file.filename,
-        file_type=ext.lstrip("."),  # store "pdf" not ".pdf"
-        file_path=stored_name,  # relative to UPLOAD_DIR
-        file_size=len(content),
-        uploaded_by=current_user.id,
-        status="processing",
-        visibility="public",  # Knowledge Base → shared across all accounts
-    )
+    doc = await save_upload(file, current_user.id, "public")
     db.add(doc)
     await db.flush()
     await db.refresh(doc)
@@ -148,35 +90,9 @@ async def upload_document(
     # (The get_db dependency will also try to commit, which becomes a no-op.)
     await db.commit()
 
-    # Trigger async ingestion in the background (creates its own DB session).
-    # Using asyncio.create_task instead of BackgroundTasks because the latter
-    # does not reliably await async coroutines in all FastAPI versions.
-    import asyncio
-    from app.services.vectorization import ingest_document, _set_status_fresh
-
-    async def _safe_ingest() -> None:
-        """Run ingestion in background.
-
-        Catches BaseException (not just Exception) because asyncio.CancelledError
-        is NOT a subclass of Exception in Python 3.9+.  Always updates the
-        document status so the frontend doesn't poll forever.
-        """
-        try:
-            await ingest_document(
-                doc_id=doc.id,
-                file_path=disk_path,
-                file_type=doc.file_type,
-            )
-        except BaseException:
-            import logging
-
-            logging.getLogger(__name__).exception(
-                "Background ingestion failed for document %s",
-                doc.id,
-            )
-            await _set_status_fresh(KnowledgeDocument, doc.id, "error")
-
-    asyncio.create_task(_safe_ingest())
+    background_tasks.add_task(
+        ingest_document, doc.id, upload_dir() / doc.file_path, doc.file_type
+    )
 
     # Build response (uploader relationship is eager-loaded via `joined`)
     return _doc_to_response(doc)
@@ -236,7 +152,7 @@ async def download_document(
     """Return the raw file for download."""
     doc = await _get_doc_or_404(db, document_id, current_user.id)
 
-    disk_path = _resolve_upload_path() / doc.file_path
+    disk_path = upload_dir() / doc.file_path
     if not disk_path.is_file():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -265,20 +181,16 @@ async def delete_document(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Remove a document's metadata, file from disk, and FAISS index entries.
-
-    Chunks in pgvector are cascade-deleted by the FK; FAISS is cleaned up here.
-    """
+    """Remove a document's metadata, file, and stored vector chunks."""
     doc = await _get_doc_or_404(db, document_id, current_user.id)
-
-    # Remove from FAISS before DB cascade (need chunk IDs from DB first)
-    from app.services.faiss_service import get_faiss_service
-
-    faiss = get_faiss_service()
-    await faiss.remove_document(document_id, db)
+    if doc.uploaded_by != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only delete your own documents.",
+        )
 
     # Remove file from disk (best-effort — log but don't fail if missing)
-    disk_path = _resolve_upload_path() / doc.file_path
+    disk_path = upload_dir() / doc.file_path
     try:
         disk_path.unlink(missing_ok=True)
     except OSError:
@@ -300,35 +212,34 @@ async def delete_document(
 )
 async def reingest_document(
     document_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Re-run the full ingestion pipeline for a document whose previous
     ingestion failed (status='error') or was cancelled.
 
-    Deletes any stale chunks from the previous attempt, removes stale FAISS
-    entries, resets the status to 'processing', and fires the ingestion
+    Deletes any stale chunks from the previous attempt, resets the status to
+    'processing', and fires the ingestion
     pipeline in the background.  The frontend can poll GET /documents until
     the status changes to 'indexed' or 'error' again.
     """
     doc = await _get_doc_or_404(db, document_id, current_user.id)
+    if doc.uploaded_by != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only reingest your own documents.",
+        )
 
     # Verify the source file still exists on disk
-    disk_path = _resolve_upload_path() / doc.file_path
+    disk_path = upload_dir() / doc.file_path
     if not disk_path.is_file():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Source file not found on disk — re-upload the document instead.",
         )
 
-    # ── Clear stale data from previous attempt ──
-    from app.services.faiss_service import get_faiss_service
-
-    faiss = get_faiss_service()
-    await faiss.remove_document(document_id, db)
-
-    # Delete existing chunks from pgvector (cascade would handle it, but
-    # explicit delete avoids any FK ordering issues with FAISS removed first)
+    # Clear chunks from the previous attempt.
     await db.execute(
         delete(DocumentChunk).where(DocumentChunk.document_id == document_id)
     )
@@ -338,26 +249,7 @@ async def reingest_document(
     await db.flush()
     await db.commit()
 
-    import asyncio
-    from app.services.vectorization import ingest_document, _set_status_fresh
-
-    async def _safe_ingest() -> None:
-        try:
-            await ingest_document(
-                doc_id=doc.id,
-                file_path=disk_path,
-                file_type=doc.file_type,
-            )
-        except BaseException:
-            import logging
-
-            logging.getLogger(__name__).exception(
-                "Retry ingestion failed for document %s",
-                doc.id,
-            )
-            await _set_status_fresh(KnowledgeDocument, doc.id, "error")
-
-    asyncio.create_task(_safe_ingest())
+    background_tasks.add_task(ingest_document, doc.id, disk_path, doc.file_type)
 
     return _doc_to_response(doc)
 
@@ -377,69 +269,29 @@ async def search_knowledge(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Search document chunks by natural-language query using FAISS ANN + pgvector.
+    """Search public document chunks by vector similarity in PostgreSQL.
 
     The query is embedded with the same model used during ingestion,
     then the top-k most similar chunks are returned with their scores
     and parent document metadata.
     """
-    from app.services.faiss_service import get_faiss_service
-    from app.services.vectorization import _get_embedding_model
-
-    # 1. Embed the query with the same model used during ingestion
-    model = _get_embedding_model()
-    query_embedding = model.embed_query(body.query)
-
-    # 2. FAISS ANN search → get (chunk_id, score) pairs
-    faiss = get_faiss_service()
-    hits = faiss.search(query_embedding, body.top_k)
-
-    if not hits:
-        return SearchResponse(results=[], query=body.query, total=0)
-
-    # 3. Fetch chunk content + parent document metadata from pgvector
-    #    — only public documents (knowledge base), not private project files
-    chunk_ids = [chunk_id for chunk_id, _score in hits]
-
-    result = await db.execute(
-        select(DocumentChunk)
-        .join(DocumentChunk.document)
-        .options(selectinload(DocumentChunk.document))
-        .where(
-            DocumentChunk.id.in_(chunk_ids),
-            KnowledgeDocument.visibility == "public",
+    hits = await search_public_chunks(db, body.query, body.top_k)
+    results = [
+        SearchResult(
+            chunk_id=chunk.id,
+            content=chunk.content,
+            score=score,
+            metadata=chunk.metadata_json or {},
+            document=DocumentRef(
+                id=chunk.document.id,
+                filename=chunk.document.filename,
+                file_type=chunk.document.file_type,
+            ),
         )
-    )
-    chunks = result.scalars().all()
+        for chunk, score in hits
+    ]
 
-    # Build a dict for O(1) lookup by chunk ID
-    chunks_by_id = {c.id: c for c in chunks}
-
-    # 4. Assemble response preserving FAISS rank order
-    results: list[SearchResult] = []
-    for chunk_id, score in hits:
-        chunk = chunks_by_id.get(chunk_id)
-        if chunk is None:
-            continue
-        results.append(
-            SearchResult(
-                chunk_id=chunk.id,
-                content=chunk.content,
-                score=score,
-                metadata=chunk.metadata_json or {},
-                document=DocumentRef(
-                    id=chunk.document.id,
-                    filename=chunk.document.filename,
-                    file_type=chunk.document.file_type,
-                ),
-            )
-        )
-
-    return SearchResponse(
-        results=results,
-        query=body.query,
-        total=len(results),
-    )
+    return SearchResponse(results=results, query=body.query, total=len(results))
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

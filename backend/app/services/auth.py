@@ -7,7 +7,7 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.user import TokenBlacklist, User
+from app.models.user import User
 from app.schemas.auth import UserRegister
 from app.utils.security import (
     create_access_token,
@@ -87,27 +87,16 @@ def generate_tokens(user: User) -> dict:
 # ── Token Blacklist ───────────────────────────────────────────────────────────
 
 
-async def blacklist_token(db: AsyncSession, jti: str, expires_at: datetime) -> None:
-    """Insert a JWT ID into the blacklist so it can't be reused.
-
-    Uses INSERT ... ON CONFLICT DO NOTHING so concurrent refresh calls or
-    re-sent cookies don't crash with a UniqueViolationError.  If the jti
-    was already blacklisted by another request, this is a silent no-op.
-    """
+async def blacklist_token(db: AsyncSession, jti: str, expires_at: datetime) -> bool:
+    """Atomically revoke a token; return False if it was already revoked."""
     from sqlalchemy import text
 
-    await db.execute(
+    result = await db.execute(
         text(
             "INSERT INTO token_blacklist (id, jti, expires_at) "
             "VALUES (gen_random_uuid(), :jti, :expires_at) "
-            "ON CONFLICT (jti) DO NOTHING"
+            "ON CONFLICT (jti) DO NOTHING RETURNING id"
         ),
         {"jti": jti, "expires_at": expires_at},
     )
-    await db.flush()
-
-
-async def is_token_blacklisted(db: AsyncSession, jti: str) -> bool:
-    """Return ``True`` if *jti* has been revoked."""
-    result = await db.execute(select(TokenBlacklist).where(TokenBlacklist.jti == jti))
     return result.scalar_one_or_none() is not None

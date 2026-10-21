@@ -18,7 +18,7 @@ import {
     useState,
     type ReactNode,
 } from "react";
-import apiClient, { setAccessToken } from "../api/client";
+import apiClient, { refreshAccessToken, setAccessToken } from "../api/client";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -50,18 +50,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     // ── Silent refresh on mount ────────────────────────────────────────────
     useEffect(() => {
-        // Abort flag prevents stale async results from overwriting state when
-        // React StrictMode double-mounts (dev) or when the component unmounts
-        // before the refresh completes. Without this, two concurrent refresh
-        // calls race: the first blacklists the cookie, the second fails with
-        // 401, and if it resolves last it logs the user out.
+        // Prevent stale results from overwriting state after cleanup. The API
+        // client shares the refresh request across StrictMode effect runs.
         let cancelled = false;
 
         const restoreSession = async () => {
             try {
-                const { data } = await apiClient.post("/auth/refresh");
+                await refreshAccessToken();
                 if (cancelled) return;
-                setAccessToken(data.access_token);
                 // Fetch user profile with the fresh access token
                 const { data: userData } = await apiClient.get("/auth/me");
                 if (cancelled) return;

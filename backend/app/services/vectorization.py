@@ -4,7 +4,6 @@
 #   2. Split into overlapping chunks via RecursiveCharacterTextSplitter.
 #   3. Embed chunks via HuggingFaceEmbeddings (all-MiniLM-L6-v2, local, free).
 #   4. Bulk-persist DocumentChunk rows (content + vectors) into pgvector.
-#   5. Add new vectors to the in-memory FAISS index incrementally.
 #
 # The embedding model is loaded once as a singleton to avoid repeated
 # downloads / GPU warm-up.  Ingestion runs in a FastAPI BackgroundTask so the
@@ -12,6 +11,7 @@
 
 import asyncio
 import logging
+import threading
 from pathlib import Path
 from uuid import UUID
 
@@ -34,20 +34,20 @@ logger = logging.getLogger(__name__)
 # Lazy-loaded on first use; reused for all subsequent ingestions + queries.
 
 _embedding_model: HuggingFaceEmbeddings | None = None
+_embedding_model_lock = threading.Lock()
 
 
 def _get_embedding_model() -> HuggingFaceEmbeddings:
     """Return the shared HuggingFaceEmbeddings instance, loading it once."""
     global _embedding_model
     if _embedding_model is None:
-        logger.info("Loading embedding model: %s", settings.EMBEDDING_MODEL)
-        _embedding_model = HuggingFaceEmbeddings(
-            model_name=settings.EMBEDDING_MODEL,
-            model_kwargs={"trust_remote_code": True},
-            # encode_kwargs={"normalize_embeddings": True} — we normalize
-            # lazily before inserting into FAISS, not at embed time, so we
-            # keep raw embeddings for pgvector storage.
-        )
+        with _embedding_model_lock:
+            if _embedding_model is None:
+                logger.info("Loading embedding model: %s", settings.EMBEDDING_MODEL)
+                _embedding_model = HuggingFaceEmbeddings(
+                    model_name=settings.EMBEDDING_MODEL,
+                    model_kwargs={"trust_remote_code": True},
+                )
     return _embedding_model
 
 
@@ -128,7 +128,7 @@ async def ingest_document(
     file_path: Path,
     file_type: str,
 ) -> None:
-    """Full ingestion pipeline: load → split → embed → persist chunks → update FAISS.
+    """Full ingestion pipeline: load → split → embed → persist chunks.
 
     CPU-bound work (file loading, text splitting, embedding) runs *outside*
     the DB session so a long model download or large file doesn't hold a
@@ -142,13 +142,12 @@ async def ingest_document(
     """
     from app.database import AsyncSessionLocal
     from app.models.knowledge import KnowledgeDocument
-    from app.services.faiss_service import get_faiss_service
 
     try:
         # ── Phase 1: CPU-bound work (no DB session held) ──────────────────
 
         # 1a. Load raw text from file (sync, fast)
-        raw_docs = load_document(file_path, file_type)
+        raw_docs = await asyncio.to_thread(load_document, file_path, file_type)
         if not raw_docs:
             logger.warning("No text extracted from document %s", doc_id)
             async with AsyncSessionLocal() as db:
@@ -156,21 +155,18 @@ async def ingest_document(
             return
 
         # 1b. Split into overlapping chunks (sync, fast)
-        chunks = split_documents(raw_docs)
+        chunks = await asyncio.to_thread(split_documents, raw_docs)
         logger.info("Document %s: split into %d chunks", doc_id, len(chunks))
 
         # 1c. Embed via thread pool — runs off the event loop so the
         #     first-call model download (~90 MB) doesn't block anything.
-        model = _get_embedding_model()
         texts = [chunk.page_content for chunk in chunks]
         embeddings = await asyncio.wait_for(
-            asyncio.to_thread(model.embed_documents, texts),
+            asyncio.to_thread(lambda: _get_embedding_model().embed_documents(texts)),
             timeout=settings.INGESTION_TIMEOUT_SECONDS,
         )
 
         # ── Phase 2: Persist (short-lived DB session) ─────────────────────
-
-        chunk_ids_and_vectors: list[tuple[UUID, list[float]]] = []
 
         async with AsyncSessionLocal() as db:
             # 2a. Bulk-insert DocumentChunk rows into pgvector
@@ -187,16 +183,10 @@ async def ingest_document(
                     metadata_json=chunk.metadata if chunk.metadata else None,
                 )
                 chunk_models.append(chunk_model)
-                chunk_ids_and_vectors.append((chunk_model.id, vector))
-
             db.add_all(chunk_models)
             await db.flush()
 
-            # 2b. Incrementally add to the in-memory FAISS index
-            faiss = get_faiss_service()
-            faiss.add_chunks(chunk_ids_and_vectors)
-
-            # 2c. Mark as successfully indexed
+            # 2b. Mark as successfully indexed
             await _set_status(db, KnowledgeDocument, doc_id, "indexed")
 
         logger.info(
@@ -216,6 +206,11 @@ async def ingest_document(
     except Exception:
         logger.exception("Ingestion failed for document %s", doc_id)
         await _set_status_fresh(KnowledgeDocument, doc_id, "error")
+
+
+async def ingest_documents(documents: list[tuple[UUID, Path, str]]) -> None:
+    """Ingest a project's files concurrently in one background task."""
+    await asyncio.gather(*(ingest_document(*document) for document in documents))
 
 
 async def _set_status(

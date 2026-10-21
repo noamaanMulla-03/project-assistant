@@ -40,10 +40,10 @@ services:
         env_file:
             - .env
         volumes:
-            # Mount the backend code for hot-reload during development
-            - ./backend:/app
-            # Prevent the virtual env from being shadowed by the bind mount
-            - /app/.venv
+            # Mount source without shadowing or duplicating the image's virtual env
+            - ./backend/app:/app/app
+            - ./backend/alembic:/app/alembic
+            - ./backend/tests:/app/tests
             # Persist uploaded knowledge-base files outside the container
             - uploads:/app/uploads
             # Persist HuggingFace model cache so the embedding model is not
@@ -68,8 +68,10 @@ services:
         env_file:
             - .env
         volumes:
-            - ./frontend:/app
-            - /app/node_modules
+            # Keep installed dependencies in the image; hot-reload the app source
+            - ./frontend/src:/app/src
+            - ./frontend/public:/app/public
+            - ./frontend/index.html:/app/index.html
         depends_on:
             - backend
         networks:

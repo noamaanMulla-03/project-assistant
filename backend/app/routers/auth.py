@@ -15,6 +15,7 @@ from jose import JWTError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.dependencies import get_current_user, get_db
 from app.models.user import User
 from app.schemas.auth import (
@@ -30,7 +31,6 @@ from app.services.auth import (
     authenticate_user,
     blacklist_token,
     generate_tokens,
-    is_token_blacklisted,
     register_user,
 )
 from app.utils.security import decode_token
@@ -40,7 +40,17 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 # ── Cookie helpers ────────────────────────────────────────────────────────────
 _REFRESH_COOKIE_KEY = "refresh_token"
 _REFRESH_COOKIE_PATH = "/auth"
-_REFRESH_COOKIE_MAX_AGE = 60 * 60 * 24 * 7  # 7 days
+
+
+def _check_cookie_origin(request: Request) -> None:
+    """Reject cross-origin cookie requests when SameSite=None is enabled."""
+    if settings.REFRESH_COOKIE_SAMESITE == "none":
+        origin = request.headers.get("origin")
+        if origin not in settings.cors_origin_list:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Origin not allowed.",
+            )
 
 
 def _set_refresh_cookie(response: Response, token: str) -> None:
@@ -50,9 +60,9 @@ def _set_refresh_cookie(response: Response, token: str) -> None:
         value=token,
         httponly=True,
         secure=True,  # Set False if testing over plain HTTP locally
-        samesite="strict",
+        samesite=settings.REFRESH_COOKIE_SAMESITE,
         path=_REFRESH_COOKIE_PATH,
-        max_age=_REFRESH_COOKIE_MAX_AGE,
+        max_age=60 * 60 * 24 * settings.REFRESH_TOKEN_EXPIRE_DAYS,
     )
 
 
@@ -63,7 +73,7 @@ def _clear_refresh_cookie(response: Response) -> None:
         path=_REFRESH_COOKIE_PATH,
         httponly=True,
         secure=True,
-        samesite="strict",
+        samesite=settings.REFRESH_COOKIE_SAMESITE,
     )
 
 
@@ -140,6 +150,8 @@ async def refresh(
 
     The old refresh token is rotated (blacklisted) so it cannot be reused.
     """
+    _check_cookie_origin(request)
+
     # Read the httpOnly refresh-token cookie from the request
     token = request.cookies.get(_REFRESH_COOKIE_KEY)
     if token is None:
@@ -173,20 +185,18 @@ async def refresh(
             detail="Malformed token payload.",
         )
 
-    # Reject if the token has been revoked (reuse detection)
-    if await is_token_blacklisted(db, jti):
+    # Claim the old token atomically. Only the request that inserts its jti
+    # may issue a replacement token.
+    if not await blacklist_token(
+        db,
+        jti,
+        expires_at=datetime.fromtimestamp(payload["exp"], tz=UTC),
+    ):
         _clear_refresh_cookie(response)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Refresh token has been revoked.  Please log in again.",
         )
-
-    # Blacklist the *old* refresh token (rotation)
-    await blacklist_token(
-        db,
-        jti,
-        expires_at=datetime.fromtimestamp(payload["exp"], tz=UTC),
-    )
 
     # Fetch the user to ensure they still exist
     result = await db.execute(select(User).where(User.id == UUID(user_id)))
@@ -220,20 +230,18 @@ async def logout(
     db: AsyncSession = Depends(get_db),
 ):
     """Revoke the current refresh token and clear the cookie."""
+    _check_cookie_origin(request)
     token = request.cookies.get(_REFRESH_COOKIE_KEY)
     if token is not None:
         try:
             payload = decode_token(token)
             jti = payload.get("jti")
             if jti is not None:
-                # Only blacklist if not already revoked (avoids duplicate-key error
-                # after refresh rotation or repeated logout attempts)
-                if not await is_token_blacklisted(db, jti):
-                    await blacklist_token(
-                        db,
-                        jti,
-                        expires_at=datetime.fromtimestamp(payload["exp"], tz=UTC),
-                    )
+                await blacklist_token(
+                    db,
+                    jti,
+                    expires_at=datetime.fromtimestamp(payload["exp"], tz=UTC),
+                )
         except JWTError:
             pass  # Token already invalid — nothing to revoke
 

@@ -61,6 +61,24 @@ async def test_get_nonexistent_project(mock_db: AsyncMock, sample_user):
     assert exc.value.status_code == status.HTTP_404_NOT_FOUND
 
 
+@pytest.mark.asyncio
+async def test_get_other_users_project_is_forbidden(
+    mock_db: AsyncMock, sample_user, sample_project
+):
+    sample_project.created_by = uuid.uuid4()
+    project_result = MagicMock()
+    project_result.scalar_one_or_none.return_value = sample_project
+    mock_db.execute.return_value = project_result
+
+    with pytest.raises(HTTPException) as exc:
+        await get_project(
+            project_id=sample_project.id, db=mock_db, current_user=sample_user
+        )
+
+    assert exc.value.status_code == status.HTTP_403_FORBIDDEN
+    mock_db.execute.assert_awaited_once()  # No document lookup follows.
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  POST /projects/{id}/analyze
 # ═══════════════════════════════════════════════════════════════════════════════

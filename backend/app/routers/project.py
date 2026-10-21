@@ -13,14 +13,12 @@
 #   • GET /projects — paginated list of the current user's projects.
 
 import uuid
-from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, status
 from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import settings
 from app.dependencies import get_current_user, get_db
 from app.models.knowledge import KnowledgeDocument
 from app.models.project import Project
@@ -32,31 +30,12 @@ from app.schemas.project import (
     ProjectResponse,
     ReviewSummaryRequest,
 )
+from app.services.uploads import save_upload, upload_dir
+from app.services.vectorization import ingest_documents
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
-# ── Helpers (reuse patterns from knowledge router) ────────────────────────────
-
-
-def _validate_ext(filename: str) -> str:
-    """Return the lowercase extension without dot if allowed, else raise 400."""
-    ext = Path(filename).suffix.lower()
-    if ext not in settings.allowed_upload_extensions_set:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                f"File type '{ext}' is not allowed. "
-                f"Accepted: {', '.join(sorted(settings.allowed_upload_extensions_set))}"
-            ),
-        )
-    return ext
-
-
-def _upload_dir() -> Path:
-    """Return the absolute upload directory, creating it if needed."""
-    path = Path(settings.UPLOAD_DIR).resolve()
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 
 def _derive_project_status(doc_statuses: list[str]) -> str:
@@ -126,6 +105,7 @@ def _project_to_response(
     summary="Create a new project with 1-3 uploaded documents",
 )
 async def create_project(
+    background_tasks: BackgroundTasks,
     file1: UploadFile | None = None,
     file2: UploadFile | None = None,
     file3: UploadFile | None = None,
@@ -135,7 +115,7 @@ async def create_project(
     """Upload 1-3 documents and group them into a project for AI analysis.
 
     Each provided file is saved to disk, stored as a KnowledgeDocument, and
-    queued for async chunking/embedding/FAISS-indexing (same pipeline as
+    queued for async chunking and embedding (same pipeline as
     ``POST /knowledge/upload``).  The project status is ``"indexing"`` until
     all documents finish ingestion.
     """
@@ -147,47 +127,7 @@ async def create_project(
             detail="At least one file is required (file1, file2, or file3).",
         )
 
-    max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
-    upload_dir = _upload_dir()
-    doc_rows: list[KnowledgeDocument] = []
-
-    for f in files:
-        # Validate
-        if not f.filename:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="All files must have a filename.",
-            )
-        _validate_ext(f.filename)
-
-        # Read content
-        content = await f.read()
-        if len(content) > max_bytes:
-            raise HTTPException(
-                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                detail=(
-                    f"File '{f.filename}' exceeds maximum size of "
-                    f"{settings.MAX_UPLOAD_SIZE_MB} MB."
-                ),
-            )
-
-        # Save to disk with UUID-safe name
-        ext = Path(f.filename).suffix.lower()
-        stored_name = f"{uuid.uuid4().hex}{ext}"
-        disk_path = upload_dir / stored_name
-        disk_path.write_bytes(content)
-
-        # Create KnowledgeDocument row
-        doc = KnowledgeDocument(
-            filename=f.filename,
-            file_type=ext.lstrip("."),
-            file_path=stored_name,
-            file_size=len(content),
-            uploaded_by=current_user.id,
-            status="processing",
-            visibility="private",  # Project docs → uploader-only
-        )
-        doc_rows.append(doc)
+    doc_rows = [await save_upload(file, current_user.id, "private") for file in files]
 
     # Bulk-persist all KnowledgeDocument rows
     db.add_all(doc_rows)
@@ -209,32 +149,10 @@ async def create_project(
     # Commit now so the background tasks can see these rows in their sessions
     await db.commit()
 
-    # Fire async ingestion for each document (same pattern as /knowledge/upload)
-    import asyncio
-    from app.services.vectorization import ingest_document, _set_status_fresh
-
-    async def _safe_ingest(doc: KnowledgeDocument, path: Path) -> None:
-        """Run ingestion in background.
-
-        Catches BaseException (not just Exception) because asyncio.CancelledError
-        is NOT a subclass of Exception in Python 3.9+.  Always updates the
-        document status so the frontend doesn't poll forever.
-        """
-        try:
-            await ingest_document(
-                doc_id=doc.id, file_path=path, file_type=doc.file_type
-            )
-        except BaseException:
-            import logging
-
-            logging.getLogger(__name__).exception(
-                "Background ingestion failed for document %s",
-                doc.id,
-            )
-            await _set_status_fresh(KnowledgeDocument, doc.id, "error")
-
-    for d in doc_rows:
-        asyncio.create_task(_safe_ingest(d, upload_dir / d.file_path))
+    background_tasks.add_task(
+        ingest_documents,
+        [(d.id, upload_dir() / d.file_path, d.file_type) for d in doc_rows],
+    )
 
     # Build response from the already-fetched doc rows
     doc_refs = [
@@ -277,6 +195,11 @@ async def get_project(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Project not found.",
+        )
+    if project.created_by != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only view your own projects.",
         )
 
     # Resolve current per-document statuses from KnowledgeDocument rows
@@ -341,7 +264,7 @@ async def remove_project_document(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Delete a document from a project — removes from disk, pgvector, FAISS,
+    """Delete a document from a project — removes from disk and pgvector,
     and updates the project's document list.  Returns the updated project.
     If the last document is removed, the project itself is deleted."""
     # 1. Fetch project & verify ownership
@@ -376,23 +299,17 @@ async def remove_project_document(
             detail="Document not found.",
         )
 
-    # 4. Remove from FAISS
-    from app.services.faiss_service import get_faiss_service
-
-    faiss = get_faiss_service()
-    await faiss.remove_document(document_id, db)
-
-    # 5. Remove file from disk (best-effort)
-    disk_path = _upload_dir() / doc.file_path
+    # 4. Remove file from disk (best-effort)
+    disk_path = upload_dir() / doc.file_path
     try:
         disk_path.unlink(missing_ok=True)
     except OSError:
         pass
 
-    # 6. Delete the KnowledgeDocument (cascade-deletes chunks in pgvector)
+    # 5. Delete the KnowledgeDocument (cascade-deletes chunks in pgvector)
     await db.delete(doc)
 
-    # 7. Update project's document_ids array
+    # 6. Update project's document_ids array
     new_ids = [did for did in project.document_ids if did != document_id]
 
     if not new_ids:
@@ -414,7 +331,7 @@ async def remove_project_document(
     await db.commit()
     await db.refresh(project)
 
-    # 8. Return updated project
+    # 7. Return updated project
     doc_refs = await _resolve_documents(db, project.document_ids)
     return _project_to_response(project, doc_refs)
 
@@ -442,7 +359,7 @@ async def analyze_project(
     to re-run the full pipeline (the "Redo Analysis" button).
 
     Retrieves pre-vectorized document chunks from pgvector, searches for
-    relevant organizational policy chunks via FAISS, then runs a local LLM
+    relevant organizational policy chunks via pgvector, then runs a local LLM
     (Qwen3 7B via Ollama) to extract facts, decisions, assumptions, risks,
     open questions, action items, cross-document conflicts, and policy-gap
     missing actions.

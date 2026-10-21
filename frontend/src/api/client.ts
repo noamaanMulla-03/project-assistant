@@ -40,35 +40,37 @@ apiClient.interceptors.request.use((config: InternalAxiosRequestConfig) => {
 	return config;
 });
 
-// ── Response interceptor: auto-refresh on 401 ────────────────────────────────
-let isRefreshing = false;
-let failedQueue: Array<{
-	resolve: (token: string) => void;
-	reject: (error: unknown) => void;
-}> = [];
+// Share one refresh request across session restoration and 401 retries.
+let refreshPromise: Promise<string> | null = null;
 
-function processQueue(error: unknown, token: string | null = null): void {
-	failedQueue.forEach((promise) => {
-		if (error) {
-			promise.reject(error);
-		} else {
-			promise.resolve(token!);
-		}
-	});
-	failedQueue = [];
+export function refreshAccessToken(): Promise<string> {
+	if (!refreshPromise) {
+		refreshPromise = apiClient.post<{ access_token: string }>("/auth/refresh")
+			.then(({ data }) => {
+				setAccessToken(data.access_token);
+				return data.access_token;
+			})
+			.finally(() => {
+				refreshPromise = null;
+			});
+	}
+	return refreshPromise;
 }
+
+// ── Response interceptor: auto-refresh on 401 ────────────────────────────────
 
 apiClient.interceptors.response.use(
 	(response) => response,
 	async (error: AxiosError) => {
-		const originalRequest = error.config as InternalAxiosRequestConfig & {
+		const originalRequest = error.config as (InternalAxiosRequestConfig & {
 			_retry?: boolean;
-		};
+		}) | undefined;
 
 		// Only attempt refresh on 401, if we haven't already retried, and the
 		// failing request is NOT the /auth/refresh endpoint itself (avoids
 		// infinite recursion when the refresh token is also expired).
 		if (
+			!originalRequest ||
 			error.response?.status !== 401 ||
 			originalRequest._retry ||
 			originalRequest.url?.endsWith("/auth/refresh")
@@ -76,44 +78,22 @@ apiClient.interceptors.response.use(
 			return Promise.reject(error);
 		}
 
-		// If a refresh is already in progress, queue this request
-		if (isRefreshing) {
-			return new Promise<string>((resolve, reject) => {
-				failedQueue.push({ resolve, reject });
-			})
-				.then((token) => {
-					if (originalRequest.headers) {
-						originalRequest.headers.Authorization = `Bearer ${token}`;
-					}
-					return apiClient(originalRequest);
-				})
-				.catch((err) => Promise.reject(err));
-		}
-
 		originalRequest._retry = true;
-		isRefreshing = true;
 
+		let newToken: string;
 		try {
-			// Use apiClient (not raw axios) so the baseURL is respected in
-			// production. apiClient already has withCredentials: true set.
-			const { data } = await apiClient.post("/auth/refresh");
-			const newToken: string = data.access_token;
-			setAccessToken(newToken);
-			processQueue(null, newToken);
-
-			if (originalRequest.headers) {
-				originalRequest.headers.Authorization = `Bearer ${newToken}`;
-			}
-			return apiClient(originalRequest);
+			newToken = await refreshAccessToken();
 		} catch (refreshError) {
-			processQueue(refreshError, null);
 			setAccessToken(null);
 			// Redirect to login — use a dispatched event to avoid circular dependency
 			window.dispatchEvent(new CustomEvent("auth:logout"));
 			return Promise.reject(refreshError);
-		} finally {
-			isRefreshing = false;
 		}
+
+		if (originalRequest.headers) {
+			originalRequest.headers.Authorization = `Bearer ${newToken}`;
+		}
+		return apiClient(originalRequest);
 	},
 );
 

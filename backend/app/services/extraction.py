@@ -4,7 +4,7 @@
 #
 # Architecture:
 #   Phase A — Agent: The LLM is given two @tools (retrieve documents from
-#     pgvector, search policies via FAISS) and autonomously explores.
+#     pgvector, search policies via pgvector) and autonomously explores.
 #   Phase B — 4-phase structured pipeline: Per-document extraction, cross-
 #     document conflict detection, policy-gap analysis, executive summary.
 #     Each phase uses Ollama's native JSON schema mode (via
@@ -17,7 +17,6 @@ from uuid import UUID
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from app.config import settings
 from app.models.knowledge import DocumentChunk, KnowledgeDocument
@@ -793,42 +792,11 @@ async def _search_policy_chunks(
     exclude_doc_ids: list[UUID],
     top_k: int,
 ) -> list[tuple[int, str, dict | None, str]]:
-    """Semantically search FAISS for policy chunks and filter to public docs."""
-    from app.services.faiss_service import get_faiss_service
-    from app.services.vectorization import _get_embedding_model
+    """Semantically search public policy chunks in pgvector."""
+    from app.services.search import search_public_chunks
 
-    faiss = get_faiss_service()
-    if faiss._index.ntotal == 0:
-        logger.debug("FAISS index empty — skipping policy search")
-        return []
-
-    model = _get_embedding_model()
-    query_embedding = model.embed_query(query)
-    hits = faiss.search(query_embedding, top_k * 2)
-    if not hits:
-        return []
-
-    chunk_ids = [cid for cid, _ in hits]
-    score_by_id = {cid: score for cid, score in hits}
-
-    result = await db.execute(
-        select(DocumentChunk)
-        .options(selectinload(DocumentChunk.document))
-        .where(DocumentChunk.id.in_(chunk_ids)),
-    )
-    chunks = result.scalars().all()
-
-    filtered: list[tuple[int, str, dict | None, str, float]] = []
-    for chunk in chunks:
-        doc = chunk.document
-        if doc is None or doc.visibility != "public" or doc.id in exclude_doc_ids:
-            continue
-        score = score_by_id.get(chunk.id, 0.0)
-        filtered.append(
-            (chunk.chunk_index, chunk.content, chunk.metadata_json, doc.filename, score)
-        )
-
-    filtered.sort(key=lambda x: x[4], reverse=True)
+    hits = await search_public_chunks(db, query, top_k, exclude_doc_ids)
     return [
-        (idx, content, meta, fname) for idx, content, meta, fname, _ in filtered[:top_k]
+        (chunk.chunk_index, chunk.content, chunk.metadata_json, chunk.document.filename)
+        for chunk, _score in hits
     ]

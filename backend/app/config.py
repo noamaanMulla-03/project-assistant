@@ -1,6 +1,8 @@
 # ── Application Configuration ─────────────────────────────────────────────────
 # Loads settings from environment variables / .env file via pydantic-settings.
 
+from typing import Literal
+
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -35,6 +37,7 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+    REFRESH_COOKIE_SAMESITE: Literal["strict", "lax", "none"] = "strict"
 
     # ── CORS ──────────────────────────────────────────────────────────────
     CORS_ORIGINS: str = "http://localhost:5173"

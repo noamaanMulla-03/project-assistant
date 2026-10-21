@@ -8,12 +8,13 @@ import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from fastapi import HTTPException, status
+from fastapi import BackgroundTasks, HTTPException, status
 
 from app.models.knowledge import DocumentChunk, KnowledgeDocument
 from app.routers.knowledge import (
     delete_document,
     list_documents,
+    reingest_document,
     search_knowledge,
 )
 from app.schemas.knowledge import SearchRequest
@@ -90,6 +91,26 @@ async def test_delete_nonexistent_document(mock_db: AsyncMock, sample_user):
     assert exc.value.status_code == status.HTTP_404_NOT_FOUND
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", [delete_document, reingest_document])
+async def test_other_user_cannot_modify_public_document(
+    operation, mock_db: AsyncMock, sample_user, sample_knowledge_docs
+):
+    doc = sample_knowledge_docs[0]
+    doc.uploaded_by = uuid.uuid4()
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = doc
+    mock_db.execute.return_value = result
+
+    with pytest.raises(HTTPException) as exc:
+        kwargs = {"background_tasks": BackgroundTasks()} if operation is reingest_document else {}
+        await operation(document_id=doc.id, db=mock_db, current_user=sample_user, **kwargs)
+
+    assert exc.value.status_code == status.HTTP_403_FORBIDDEN
+    mock_db.delete.assert_not_awaited()
+    mock_db.commit.assert_not_awaited()
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Search Documents
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -97,12 +118,8 @@ async def test_delete_nonexistent_document(mock_db: AsyncMock, sample_user):
 
 @pytest.mark.asyncio
 async def test_search_empty_query(mock_db: AsyncMock, sample_user):
-    """An empty FAISS result returns empty list (no crash)."""
-    with patch("app.services.faiss_service.get_faiss_service") as mock_faiss:
-        mock_svc = MagicMock()
-        mock_svc.search.return_value = []
-        mock_faiss.return_value = mock_svc
-
+    """An empty vector result returns an empty response."""
+    with patch("app.routers.knowledge.search_public_chunks", AsyncMock(return_value=[])):
         body = SearchRequest(query="nothing matches")
         response = await search_knowledge(
             body=body, db=mock_db, current_user=sample_user
@@ -113,36 +130,20 @@ async def test_search_empty_query(mock_db: AsyncMock, sample_user):
 
 @pytest.mark.asyncio
 async def test_search_with_query(mock_db: AsyncMock, sample_user):
-    """Search delegates to FAISS and returns formatted results when hits found."""
-    from app.schemas.knowledge import DocumentRef, SearchResult, SearchResponse
-
-    # Use the same UUID for FAISS hits and the DB chunk lookup
+    """Search formats ranked pgvector hits for the API response."""
     fake_chunk_id = uuid.uuid4()
+    fake_chunk = MagicMock(spec=DocumentChunk)
+    fake_chunk.id = fake_chunk_id
+    fake_chunk.content = "Relevant text."
+    fake_chunk.metadata_json = {"page": 1}
+    fake_chunk.document = MagicMock(
+        id=uuid.uuid4(), filename="policy.txt", file_type="txt"
+    )
 
-    # Patch FAISS and embedding model (both imported locally in search_knowledge)
-    with patch("app.services.faiss_service.get_faiss_service") as mock_faiss, patch(
-        "app.services.vectorization._get_embedding_model"
-    ) as mock_embed:
-        mock_svc = MagicMock()
-        mock_svc.search.return_value = [(fake_chunk_id, 0.85)]
-        mock_faiss.return_value = mock_svc
-        mock_embed.return_value.embed_query.return_value = [0.1] * 384
-
-        # Mock the DB to return a chunk whose ID matches the FAISS hit
-        fake_chunk = MagicMock(spec=DocumentChunk)
-        fake_chunk.id = fake_chunk_id  # MUST match FAISS hit ID
-        fake_chunk.content = "Relevant text."
-        fake_chunk.metadata_json = {"page": 1}
-        fake_chunk.document = MagicMock(
-            id=uuid.uuid4(),
-            filename="policy.txt",
-            file_type="txt",
-        )
-
-        chunk_result = MagicMock()
-        chunk_result.scalars.return_value.all.return_value = [fake_chunk]
-        mock_db.execute.return_value = chunk_result
-
+    with patch(
+        "app.routers.knowledge.search_public_chunks",
+        AsyncMock(return_value=[(fake_chunk, 0.85)]),
+    ):
         body = SearchRequest(query="security policy")
         response = await search_knowledge(
             body=body, db=mock_db, current_user=sample_user

@@ -33,7 +33,6 @@ langchain-huggingface>=0.1.0,<1.0.0
 langchain-ollama>=0.2.0,<1.0.0
 langgraph>=0.2.0,<1.0.0
 sentence-transformers>=3.0.0,<4.0.0
-faiss-cpu>=1.8.0,<2.0.0
 pypdf>=5.0.0,<6.0.0
 docx2txt>=0.8,<1.0
 
